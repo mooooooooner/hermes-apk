@@ -66,13 +66,16 @@ class ChatViewModel @Inject constructor(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
+    // Eagerly, because stop() reads activeRunId.value without collecting it: with
+    // WhileSubscribed the upstream never starts and .value would stay null, so the
+    // interrupt button would silently do nothing.
     val activeRunId: StateFlow<String?> = messages
         .map { list ->
             list.lastOrNull {
                 it.status == MessageStatus.STREAMING && it.runId != null
             }?.runId
         }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     fun onInputChange(value: String) {
         _input.value = value

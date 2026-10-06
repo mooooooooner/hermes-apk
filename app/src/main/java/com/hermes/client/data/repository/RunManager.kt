@@ -264,7 +264,8 @@ class RunManager @Inject constructor(
         sessionDao.touch(
             id = state.sessionId,
             updatedAt = System.currentTimeMillis(),
-            preview = state.content.toString().take(120),
+            preview = state.content.toString().take(120)
+                .ifBlank { sessionDao.get(state.sessionId)?.preview ?: "" },
         )
         notifyIfNeeded(state.runId, state.sessionId, runState, state.content.toString(), error)
     }
@@ -363,7 +364,11 @@ class RunManager @Inject constructor(
             updatedAt = System.currentTimeMillis(),
         )
         sessionDao.setActiveRun(run.sessionId, null, null)
-        sessionDao.touch(run.sessionId, System.currentTimeMillis(), content.take(120))
+        sessionDao.touch(
+            id = run.sessionId,
+            updatedAt = System.currentTimeMillis(),
+            preview = content.take(120).ifBlank { sessionDao.get(run.sessionId)?.preview ?: "" },
+        )
         notifyIfNeeded(run.runId, run.sessionId, runState, content, error)
     }
 

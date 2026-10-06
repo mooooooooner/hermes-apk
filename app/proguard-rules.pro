@@ -17,6 +17,8 @@
 # Gson / models
 -keepclassmembers class com.hermes.client.data.remote.dto.** { *; }
 -keep class com.hermes.client.data.remote.dto.** { *; }
+# These are (de)serialised by Gson inside Room TypeConverters too.
+-keep class com.hermes.client.data.model.** { *; }
 -keepclassmembers,allowobfuscation class * {
     @com.google.gson.annotations.SerializedName <fields>;
 }
