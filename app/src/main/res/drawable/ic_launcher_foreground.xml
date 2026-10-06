@@ -1,0 +1,22 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Left pillar -->
+    <path
+        android:fillColor="#FFD8A8"
+        android:pathData="M33,32 L42,32 L42,76 L33,76 Z" />
+    <!-- Right pillar -->
+    <path
+        android:fillColor="#FFD8A8"
+        android:pathData="M66,32 L75,32 L75,76 L66,76 Z" />
+    <!-- Crossbar -->
+    <path
+        android:fillColor="#FFB74D"
+        android:pathData="M42,49 L66,49 L66,58 L42,58 Z" />
+    <!-- Bolt accent -->
+    <path
+        android:fillColor="#FF8A3D"
+        android:pathData="M56,20 L46,46 L54,46 L48,64 L64,40 L55,40 Z" />
+</vector>

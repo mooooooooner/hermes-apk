@@ -1,0 +1,35 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Android
+*.apk
+*.aab
+*.ap_
+*.dex
+local.properties
+.cxx/
+release/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+captures/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs / secrets
+*.log
+keystore.properties
+*.jks
+*.keystore
+
+# Temp
+.tmp/
+
+# Local credentials (never commit)
+hermes相关服务凭据.md

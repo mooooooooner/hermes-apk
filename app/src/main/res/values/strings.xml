@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Hermes</string>
+    <string name="notification_channel_name">任务完成</string>
+    <string name="notification_channel_description">Hermes 长任务完成或失败时通知</string>
+</resources>
