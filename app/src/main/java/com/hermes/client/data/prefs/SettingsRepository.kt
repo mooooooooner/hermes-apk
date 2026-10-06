@@ -79,9 +79,19 @@ class SettingsRepository @Inject constructor(
 
     suspend fun snapshot(): AppSettings = settings.first()
 
-    suspend fun setBaseUrl(value: String) = dataStore.edit { it[KEY_BASE_URL] = value.trim() }
+    // Update the volatile mirrors synchronously as well, so a request issued right after saving
+    // (e.g. "测试连接") can't race the DataStore -> flow -> cache round trip.
+    suspend fun setBaseUrl(value: String) {
+        val trimmed = value.trim()
+        dataStore.edit { it[KEY_BASE_URL] = trimmed }
+        cachedBaseUrl = trimmed
+    }
 
-    suspend fun setApiKey(value: String) = dataStore.edit { it[KEY_API_KEY] = value.trim() }
+    suspend fun setApiKey(value: String) {
+        val trimmed = value.trim()
+        dataStore.edit { it[KEY_API_KEY] = trimmed }
+        cachedApiKey = trimmed
+    }
 
     suspend fun setThemeMode(value: ThemeMode) =
         dataStore.edit { it[KEY_THEME] = value.name }

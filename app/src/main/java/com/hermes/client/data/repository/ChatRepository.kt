@@ -182,14 +182,17 @@ class ChatRepository @Inject constructor(
 
     suspend fun fetchHistory(sessionId: String): Result<Int> = withContext(Dispatchers.IO) {
         runCatching {
-            val response = api.sessionMessages(sessionId)
-            if (response.data.isEmpty()) return@runCatching 0
-            // Server is authoritative: replace completed messages, keep any still-running ones.
-            val active = messageDao.list(sessionId).filter {
+            // Replacing the local messages would orphan the row that an in-flight stream writes
+            // into (RunEntity.assistantMessageId points at it), so refuse while a task is running.
+            val hasActive = messageDao.list(sessionId).any {
                 it.status == MessageStatus.STREAMING.name || it.status == MessageStatus.PENDING.name
             }
+            check(!hasActive) { "任务进行中，请等待完成或中断后再同步历史" }
+
+            val response = api.sessionMessages(sessionId)
+            if (response.data.isEmpty()) return@runCatching 0
+            // Server is authoritative: replace the local cache with the server transcript.
             messageDao.deleteForSession(sessionId)
-            active.forEach { messageDao.insert(it.copy(id = 0)) }
             val startSeq = (messageDao.maxSeq(sessionId) ?: 0)
             response.data.forEachIndexed { index, server ->
                 val role = when (server.role) {

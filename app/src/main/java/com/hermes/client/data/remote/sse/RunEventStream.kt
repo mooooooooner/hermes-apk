@@ -29,18 +29,17 @@ class RunEventStream @Inject constructor(
 ) {
 
     fun events(runId: String): Flow<RunEventDto> = callbackFlow {
-        val base = settings.cachedBaseUrl.trim().trimEnd('/')
-        val key = settings.cachedApiKey.trim()
-        if (base.isBlank()) {
+        if (settings.cachedBaseUrl.isBlank()) {
             close(IOException("尚未配置服务器地址"))
             awaitClose { }
             return@callbackFlow
         }
+        // Build only the RELATIVE path (placeholder host). If we used the configured Base URL here
+        // the DynamicUrlInterceptor would prepend its path a second time (e.g. /hermes-api/hermes-api/…).
         val request = Request.Builder()
-            .url("$base/v1/runs/$runId/events")
+            .url("http://localhost/v1/runs/$runId/events")
             .header("Accept", "text/event-stream")
             .header("Cache-Control", "no-cache")
-            .apply { if (key.isNotEmpty()) header("Authorization", "Bearer $key") }
             .build()
 
         val listener = object : EventSourceListener() {
