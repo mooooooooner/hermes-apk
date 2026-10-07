@@ -31,7 +31,6 @@ data class AppSettings(
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val dynamicColor: Boolean = false,
     val systemInstructions: String = "",
-    val showReasoning: Boolean = true,
     val toolProgress: Boolean = true,
     /** Display name of the assistant inside a conversation (local only). */
     val assistantName: String = "Hermes",
@@ -136,9 +135,6 @@ class SettingsRepository @Inject constructor(
     suspend fun setSystemInstructions(value: String) =
         dataStore.edit { it[KEY_SYSTEM_INSTRUCTIONS] = value }
 
-    suspend fun setShowReasoning(value: Boolean) =
-        dataStore.edit { it[KEY_SHOW_REASONING] = value }
-
     suspend fun setToolProgress(value: Boolean) =
         dataStore.edit { it[KEY_TOOL_PROGRESS] = value }
 
@@ -161,7 +157,6 @@ class SettingsRepository @Inject constructor(
             .getOrDefault(ThemeMode.SYSTEM),
         dynamicColor = this[KEY_DYNAMIC_COLOR] ?: false,
         systemInstructions = this[KEY_SYSTEM_INSTRUCTIONS] ?: "",
-        showReasoning = this[KEY_SHOW_REASONING] ?: true,
         toolProgress = this[KEY_TOOL_PROGRESS] ?: true,
         assistantName = this[KEY_ASSISTANT_NAME]?.takeIf { it.isNotBlank() } ?: "Hermes",
         assistantAvatarPath = this[KEY_ASSISTANT_AVATAR] ?: "",
@@ -174,7 +169,6 @@ class SettingsRepository @Inject constructor(
         val KEY_THEME = stringPreferencesKey("theme_mode")
         val KEY_DYNAMIC_COLOR = booleanPreferencesKey("dynamic_color")
         val KEY_SYSTEM_INSTRUCTIONS = stringPreferencesKey("system_instructions")
-        val KEY_SHOW_REASONING = booleanPreferencesKey("show_reasoning")
         val KEY_TOOL_PROGRESS = booleanPreferencesKey("tool_progress")
         val KEY_ASSISTANT_NAME = stringPreferencesKey("assistant_name")
         val KEY_ASSISTANT_AVATAR = stringPreferencesKey("assistant_avatar_path")

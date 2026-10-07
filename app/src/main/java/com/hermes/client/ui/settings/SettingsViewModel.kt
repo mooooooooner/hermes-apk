@@ -61,10 +61,6 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch { settingsRepository.setDynamicColor(enabled) }
     }
 
-    fun setShowReasoning(enabled: Boolean) {
-        viewModelScope.launch { settingsRepository.setShowReasoning(enabled) }
-    }
-
     fun setToolProgress(enabled: Boolean) {
         viewModelScope.launch { settingsRepository.setToolProgress(enabled) }
     }

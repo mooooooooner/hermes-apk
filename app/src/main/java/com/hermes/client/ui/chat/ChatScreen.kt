@@ -1,5 +1,8 @@
 package com.hermes.client.ui.chat
 
+import android.app.Activity
+import android.content.Intent
+import android.speech.RecognizerIntent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -33,6 +36,7 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Stop
@@ -63,6 +67,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -87,6 +92,7 @@ fun ChatRoute(
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val isRunning by viewModel.isRunning.collectAsStateWithLifecycle()
     val commands by viewModel.commands.collectAsStateWithLifecycle()
+    val context = LocalContext.current
 
     val snackbarHostState = remember { SnackbarHostState() }
     LaunchedEffect(Unit) {
@@ -97,13 +103,23 @@ fun ChatRoute(
         ActivityResultContracts.OpenMultipleDocuments(),
     ) { uris -> viewModel.addAttachments(uris) }
 
+    val voiceLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val spoken = result.data
+                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                ?.firstOrNull()
+            if (!spoken.isNullOrBlank()) viewModel.appendInput(spoken)
+        }
+    }
+
     ChatScreen(
         title = session?.title ?: "会话",
         messages = messages,
         input = input,
         attachments = attachments,
         isRunning = isRunning,
-        showReasoning = settings.showReasoning,
         assistantName = settings.assistantName,
         assistantAvatarPath = settings.assistantAvatarPath,
         commands = commands,
@@ -120,6 +136,22 @@ fun ChatRoute(
         onEditAndResend = viewModel::editAndResend,
         onDelete = viewModel::deleteMessage,
         onOpenMedia = viewModel::openMedia,
+        onVoice = {
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(
+                    RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                    RecognizerIntent.LANGUAGE_MODEL_FREE_FORM,
+                )
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, java.util.Locale.getDefault().toLanguageTag())
+                putExtra(RecognizerIntent.EXTRA_PROMPT, "请说话…")
+            }
+            if (intent.resolveActivity(context.packageManager) != null) {
+                runCatching { voiceLauncher.launch(intent) }
+                    .onFailure { viewModel.notify("无法启动语音输入") }
+            } else {
+                viewModel.notify("设备不支持语音输入")
+            }
+        },
     )
 }
 
@@ -131,7 +163,6 @@ fun ChatScreen(
     input: String,
     attachments: List<Attachment>,
     isRunning: Boolean,
-    showReasoning: Boolean,
     assistantName: String,
     assistantAvatarPath: String,
     commands: List<CommandDto>,
@@ -148,6 +179,7 @@ fun ChatScreen(
     onEditAndResend: (Long, String) -> Unit,
     onDelete: (Long) -> Unit,
     onOpenMedia: (String) -> Unit,
+    onVoice: () -> Unit,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
     var renameDialog by remember { mutableStateOf(false) }
@@ -157,7 +189,7 @@ fun ChatScreen(
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) listState.scrollToItem(messages.lastIndex)
     }
-    LaunchedEffect(messages.lastOrNull()?.content?.length, messages.lastOrNull()?.reasoning?.length) {
+    LaunchedEffect(messages.lastOrNull()?.content?.length) {
         if (messages.isNotEmpty()) {
             val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
             if (lastVisible >= messages.lastIndex - 2) listState.scrollToItem(messages.lastIndex)
@@ -251,7 +283,6 @@ fun ChatScreen(
                                 )
                                 else -> AssistantMessage(
                                     message = message,
-                                    showReasoning = showReasoning,
                                     assistantName = assistantName,
                                     avatarPath = assistantAvatarPath,
                                     onOpenMedia = onOpenMedia,
@@ -273,7 +304,7 @@ fun ChatScreen(
                 CommandSuggestions(
                     commands = filteredCommands,
                     onSelect = { command ->
-                        onInputChange(command.template?.takeIf { it.isNotBlank() } ?: "/${command.name}")
+                        onInputChange("/${command.name}")
                     },
                 )
             }
@@ -287,6 +318,7 @@ fun ChatScreen(
                 onStop = onStop,
                 onPickFiles = onPickFiles,
                 onSlash = { onInputChange("/") },
+                onVoice = onVoice,
             )
         }
     }
@@ -319,7 +351,7 @@ private fun AttachmentStrip(
     LazyRow(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 4.dp),
+            .padding(horizontal = 16.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         items(attachments, key = { it.id }) { attachment ->
@@ -382,6 +414,7 @@ private fun ChatInputBar(
     onStop: () -> Unit,
     onPickFiles: () -> Unit,
     onSlash: () -> Unit,
+    onVoice: () -> Unit,
 ) {
     Surface(
         color = MaterialTheme.colorScheme.background,
@@ -391,12 +424,9 @@ private fun ChatInputBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
-                .padding(horizontal = 10.dp, vertical = 8.dp),
+                .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalAlignment = Alignment.Bottom,
         ) {
-            IconButton(onClick = onPickFiles) {
-                Icon(Icons.Rounded.Add, contentDescription = "添加附件")
-            }
             OutlinedTextField(
                 value = input,
                 onValueChange = onInputChange,
@@ -405,6 +435,11 @@ private fun ChatInputBar(
                 maxLines = 6,
                 shape = MaterialTheme.shapes.large,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
+                leadingIcon = {
+                    IconButton(onClick = onPickFiles) {
+                        Icon(Icons.Rounded.Add, contentDescription = "添加附件")
+                    }
+                },
                 trailingIcon = {
                     IconButton(onClick = onSlash) {
                         Text(
@@ -415,7 +450,7 @@ private fun ChatInputBar(
                     }
                 },
             )
-            Spacer(Modifier.width(6.dp))
+            Spacer(Modifier.width(8.dp))
             if (isRunning) {
                 FilledIconButton(
                     onClick = onStop,
@@ -426,13 +461,25 @@ private fun ChatInputBar(
                 ) {
                     Icon(Icons.Rounded.Stop, contentDescription = "中断")
                 }
-                Spacer(Modifier.width(6.dp))
+                Spacer(Modifier.width(8.dp))
             }
-            FilledIconButton(
-                onClick = onSend,
-                enabled = input.isNotBlank(),
-            ) {
-                Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = "发送")
+            if (input.isBlank() && !isRunning) {
+                FilledIconButton(
+                    onClick = onVoice,
+                    colors = IconButtonDefaults.filledIconButtonColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                    ),
+                ) {
+                    Icon(Icons.Rounded.Mic, contentDescription = "语音输入")
+                }
+            } else {
+                FilledIconButton(
+                    onClick = onSend,
+                    enabled = input.isNotBlank(),
+                ) {
+                    Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = "发送")
+                }
             }
         }
     }
@@ -448,7 +495,7 @@ private fun CommandSuggestions(
         shape = MaterialTheme.shapes.medium,
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 4.dp),
+            .padding(horizontal = 16.dp, vertical = 4.dp),
     ) {
         Column(modifier = Modifier.heightIn(max = 260.dp).verticalScroll(rememberScrollState())) {
             commands.forEach { command ->

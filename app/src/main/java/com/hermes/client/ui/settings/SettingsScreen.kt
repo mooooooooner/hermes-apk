@@ -78,7 +78,6 @@ fun SettingsRoute(
         themeMode = settings.themeMode,
         dynamicColor = settings.dynamicColor,
         systemInstructions = settings.systemInstructions,
-        showReasoning = settings.showReasoning,
         toolProgress = settings.toolProgress,
         assistantName = settings.assistantName,
         assistantAvatarPath = settings.assistantAvatarPath,
@@ -89,7 +88,6 @@ fun SettingsRoute(
         onSaveInstructions = viewModel::saveSystemInstructions,
         onThemeMode = viewModel::setThemeMode,
         onDynamicColor = viewModel::setDynamicColor,
-        onShowReasoning = viewModel::setShowReasoning,
         onToolProgress = viewModel::setToolProgress,
         onAssistantName = viewModel::setAssistantName,
         onPickAvatar = { avatarPicker.launch("image/*") },
@@ -108,7 +106,6 @@ fun SettingsScreen(
     themeMode: ThemeMode,
     dynamicColor: Boolean,
     systemInstructions: String,
-    showReasoning: Boolean,
     toolProgress: Boolean,
     assistantName: String,
     assistantAvatarPath: String,
@@ -119,7 +116,6 @@ fun SettingsScreen(
     onSaveInstructions: (String) -> Unit,
     onThemeMode: (ThemeMode) -> Unit,
     onDynamicColor: (Boolean) -> Unit,
-    onShowReasoning: (Boolean) -> Unit,
     onToolProgress: (Boolean) -> Unit,
     onAssistantName: (String) -> Unit,
     onPickAvatar: () -> Unit,
@@ -277,12 +273,6 @@ fun SettingsScreen(
 
             Spacer(Modifier.height(6.dp))
             SectionTitle("对话")
-            SettingSwitch(
-                title = "显示思考过程",
-                subtitle = "展示服务端返回的 reasoning",
-                checked = showReasoning,
-                onChange = onShowReasoning,
-            )
             SettingSwitch(
                 title = "显示工具调用进度",
                 subtitle = "展示 tool.started / tool.completed",

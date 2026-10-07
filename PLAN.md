@@ -31,7 +31,7 @@
 - 🟡 插话（`/steer` 已在 RunManager 暴露，尚未接入 UI 按钮）
 
 ### P2
-- ⬜ 语音输入
+- ✅ 语音输入（系统 `RecognizerIntent`，输入框麦克风按钮；设备无识别器时 Snackbar 提示）
 - ⬜ 多服务器 / 多 profile
 - ⬜ 会话搜索
 - ✅ 子代理状态面板（`subagent.start` / `subagent.complete` 渲染在工具区）
@@ -42,15 +42,16 @@
 2. ✅ 逐字流式（SSE `message.delta`）
 3. ✅ 长任务关 App → 重开见完整结果（Room + reconcile）
 4. ✅ 完成系统通知
-5. 🟡 UI 观感（RikkaHub 风格：Material 3、大圆角、会话卡片、抽屉式信息层级）
+5. ✅ UI 观感（RikkaHub 风格：Material 3、大圆角、会话卡片；配色采用 RikkaHub 的 Claude/Anthropic 预设；统一 16dp 栅格对齐）
 6. ✅ 断网 / 切后台 / 杀进程恢复
 7. ✅ 双向文件 / 图片：用户上传 → 自建文件服务（`incoming/`），助手可直接读服务端路径；助手 → 用户，`MEDIA:url` 渲染为可下载文件卡片，Markdown 图片由带 Bearer 的 Coil 拉取内联渲染。实测端到端通过
 8. ✅ 助手名称 / 头像自定义（本地存储）：设置页可改名称、选头像，聊天头部、输入框占位、空态提示同步更新
-9. ✅ `/` 斜杠命令：命令列表从服务端 `GET {filesBase}/commands` 读取，失败回退内置；输入 `/` 弹出补全，选中插入模板
+9. ✅ `/` 斜杠命令：命令列表从服务端 `GET {filesBase}/commands` 读取（现为 Hermes 内置命令集 102 条，由 `hermes_cli/commands.py` 生成），失败回退内置；输入 `/` 弹出补全，选中插入 `/name`
+10. ✅ 应用图标：Hermes 官方图标（自适应图标 + 单色层 + 各密度位图）
 
 ## 已知限制
 - 服务端 artifacts 上传 / 下载接口在本环境返回 `browser_control_disabled`，且没有通用文件下载路由；双向文件改由自建 `hermes-files` 服务承担（`/upload` 上传、`/files/{id}` 下载、`/commands` 命令表）。助手若只给本地 `MEDIA:/绝对路径` 仍无法直接下载，需走文件服务或给出可访问 URL。
-- 真实的「思考过程」来自 `reasoning.delta`（流式）与服务端 transcript（同步）；该部署的 `reasoning.available` 只是本轮可见文本的回声，已完全忽略，避免与正文重复。
+- 真实的「思考过程」来自 `reasoning.delta`（流式）与服务端 transcript（同步）；该部署的 `reasoning.available` 只是本轮可见文本的回声，已完全忽略。按最新要求 UI 不再渲染 `reasoning`（数据仍保留在 segments 中）。
 
 ### 多轮分段模型（本次修复）
 - 助手消息持久化为有序 `segments: List<MessageSegment{reasoning, tools, text}>`（Room 新增 `segments` 列 + 1→2 迁移），按「思维链 → 工具调用 → 正文」逐轮渲染，不再把多轮压平成一整段。
@@ -68,3 +69,12 @@
 - 助手名称 + 头像本地存储（DataStore / 私有目录），设置页「助手」分组，聊天头部 / 空态 / 输入占位复用。
 - 文件服务 Base URL 为独立设置项，留空按 `baseUrl` 推导（`/hermes-api`、`/api` → `/hermes-files`，否则追加 `/hermes-files`）。
 - `/` 命令：输入框尾部 `/` 按钮或输入 `/` 触发补全，命令表来自服务端，失败回退内置。
+
+### 本批次（不显示思维链 / 折叠工具 / 语音 / UI / 主题 / 图标）
+- **不显示思维链**：移除 `ReasoningSection` 与设置页「显示思考过程」开关；`reasoning` 仍持久化在 `segments` 中，仅不渲染。
+- **自动折叠连续工具调用**：`buildRenderBlocks` 把相邻、之间无正文的 tool 事件合并成一个可折叠「工具调用 (N)」卡片（默认折叠）；中间有正文的仍按轮次分开。
+- **语音输入**：输入框空白时右侧显示麦克风，点击走系统 `RecognizerIntent`（`<queries>` 声明 `android.speech.action.RECOGNIZE_SPEECH`），识别结果追加到草稿；设备无识别器时 Snackbar 提示。
+- **UI 微调**：聊天列表 / 附件条 / 命令补全面板统一 16dp 栅格；输入框改为「`+` 前置图标 + `/` 尾部图标 + 外部发送/麦克风」，左右边距与消息对齐；助手消息按「头像 + 名称/内容」列对齐；工具卡片用 `key(event.id)` 稳定展开状态。
+- **配色**：换成 RikkaHub 的 Claude / Anthropic 预设（象牙白/米色暖底 + 赤陶橙强调），补齐 `surfaceContainer*` / `inverse*` / `errorContainer` 等 Material3 token，浅色与深色均适配。
+- **命令集**：文件服务 `commands.json` 改由 Hermes 的真实命令注册表 `hermes_cli/commands.py` 生成（现 102 条，含 `/new`、`/clear`、`/history`、`/save`、`/compress` 等），仍未改动 App 读取逻辑。
+- **应用图标**：改用 Hermes 官方 `assets/icon-master.svg` / `nous-girl-black.svg`；Pillow 生成自适应图标前景 + 单色层 + 各密度位图，背景 `#FAF9F5`。

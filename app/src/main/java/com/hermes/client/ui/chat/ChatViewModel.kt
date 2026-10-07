@@ -94,6 +94,18 @@ class ChatViewModel @Inject constructor(
         _input.value = value
     }
 
+    /** Append dictated text to the current draft (used by voice input). */
+    fun appendInput(text: String) {
+        val spoken = text.trim()
+        if (spoken.isEmpty()) return
+        val current = _input.value
+        _input.value = if (current.isBlank()) spoken else current.trimEnd() + " " + spoken
+    }
+
+    fun notify(message: String) {
+        _events.tryEmit(message)
+    }
+
     fun addAttachments(uris: List<Uri>) {
         if (uris.isEmpty()) return
         val picked = uris.map { uri ->

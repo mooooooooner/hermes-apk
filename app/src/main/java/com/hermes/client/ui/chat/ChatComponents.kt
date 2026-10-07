@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Build
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Edit
@@ -29,7 +30,6 @@ import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.SmartToy
-import androidx.compose.material.icons.rounded.Build
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -38,6 +38,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -49,12 +50,13 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.hermes.client.data.model.Attachment
 import com.hermes.client.data.model.AttachmentKind
 import com.hermes.client.data.model.ChatMessage
-import com.hermes.client.data.model.MessageRole
+import com.hermes.client.data.model.MessageSegment
 import com.hermes.client.data.model.MessageStatus
 import com.hermes.client.data.model.ToolEvent
 import com.hermes.client.ui.markdown.MarkdownText
@@ -80,6 +82,39 @@ fun TypingDots(modifier: Modifier = Modifier) {
                     .alpha(alpha)
                     .clip(CircleShape)
                     .background(MaterialTheme.colorScheme.primary),
+            )
+        }
+    }
+}
+
+@Composable
+fun AssistantAvatar(
+    avatarPath: String,
+    size: Dp = 34.dp,
+    iconSize: Dp = 20.dp,
+) {
+    Box(
+        modifier = Modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(MaterialTheme.colorScheme.primary),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (avatarPath.isNotBlank()) {
+            AsyncImage(
+                model = java.io.File(avatarPath),
+                contentDescription = null,
+                modifier = Modifier
+                    .size(size)
+                    .clip(CircleShape),
+                contentScale = ContentScale.Crop,
+            )
+        } else {
+            Icon(
+                Icons.Rounded.SmartToy,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onPrimary,
+                modifier = Modifier.size(iconSize),
             )
         }
     }
@@ -152,131 +187,136 @@ fun UserMessage(
     }
 }
 
+/** A render unit: either one collapsed group of tool calls or a block of assistant text. */
+private sealed interface RenderBlock {
+    data class Tools(val events: List<ToolEvent>) : RenderBlock
+    data class Text(val text: String) : RenderBlock
+}
+
+/**
+ * Flatten segments into blocks. Reasoning is intentionally dropped, and consecutive tool calls
+ * (tools that are not separated by any visible text) are merged into a single section so a long
+ * agent loop shows one collapsible "工具调用 (N)" chip instead of one per round.
+ */
+private fun buildRenderBlocks(segments: List<MessageSegment>): List<RenderBlock> {
+    val out = ArrayList<RenderBlock>()
+    val pendingTools = ArrayList<ToolEvent>()
+    segments.forEach { segment ->
+        pendingTools.addAll(segment.tools)
+        if (segment.text.isNotBlank()) {
+            if (pendingTools.isNotEmpty()) {
+                out.add(RenderBlock.Tools(pendingTools.toList()))
+                pendingTools.clear()
+            }
+            out.add(RenderBlock.Text(segment.text))
+        }
+    }
+    if (pendingTools.isNotEmpty()) out.add(RenderBlock.Tools(pendingTools.toList()))
+    return out
+}
+
 @Composable
 fun AssistantMessage(
     message: ChatMessage,
-    showReasoning: Boolean,
     assistantName: String = "Hermes",
     avatarPath: String = "",
     onOpenMedia: ((String) -> Unit)? = null,
 ) {
     val clipboard = LocalClipboardManager.current
     val isStreaming = message.status == MessageStatus.STREAMING || message.status == MessageStatus.PENDING
-    Column(modifier = Modifier.fillMaxWidth()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                modifier = Modifier
-                    .size(36.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.primary),
-                contentAlignment = Alignment.Center,
-            ) {
-                if (avatarPath.isNotBlank()) {
-                    AsyncImage(
-                        model = java.io.File(avatarPath),
-                        contentDescription = null,
-                        modifier = Modifier
-                            .size(36.dp)
-                            .clip(CircleShape),
-                        contentScale = ContentScale.Crop,
-                    )
-                } else {
-                    Icon(
-                        Icons.Rounded.SmartToy,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onPrimary,
-                        modifier = Modifier.size(21.dp),
-                    )
-                }
-            }
-            Spacer(Modifier.width(10.dp))
+    val blocks = buildRenderBlocks(message.renderSegments)
+
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+        AssistantAvatar(avatarPath = avatarPath)
+        Spacer(Modifier.width(10.dp))
+        Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = assistantName.ifBlank { "Hermes" },
-                style = MaterialTheme.typography.titleMedium,
+                style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-        }
-        Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(6.dp))
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                blocks.forEachIndexed { index, block ->
+                    when (block) {
+                        is RenderBlock.Tools -> key(block.events.firstOrNull()?.id ?: "tools-$index") {
+                            ToolCallsSection(block.events)
+                        }
+                        is RenderBlock.Text -> MarkdownText(text = block.text, onOpenMedia = onOpenMedia)
+                    }
+                }
 
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            message.renderSegments.forEach { segment ->
-                if (showReasoning && segment.reasoning.isNotBlank()) {
-                    ReasoningSection(segment.reasoning)
-                }
-                if (segment.tools.isNotEmpty()) {
-                    ToolCallsSection(segment.tools)
-                }
-                if (segment.text.isNotBlank()) {
-                    MarkdownText(text = segment.text, onOpenMedia = onOpenMedia)
-                }
-            }
-
-            if (isStreaming) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    TypingDots()
-                    if (message.renderSegments.none { it.text.isNotBlank() }) {
-                        Spacer(Modifier.width(10.dp))
-                        val label = message.renderSegments.lastOrNull()?.tools?.lastOrNull()
-                            ?.let { "正在执行 ${it.name}" } ?: "思考中"
-                        Text(
-                            text = label,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                if (isStreaming) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        TypingDots()
+                        if (message.renderSegments.none { it.text.isNotBlank() }) {
+                            Spacer(Modifier.width(10.dp))
+                            val label = message.renderSegments.lastOrNull { it.tools.isNotEmpty() }
+                                ?.tools?.lastOrNull()
+                                ?.let { "正在执行 ${it.name}" } ?: "思考中"
+                            Text(
+                                text = label,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
                 }
             }
-        }
 
-        if (message.status == MessageStatus.ERROR) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(top = 6.dp),
-            ) {
-                Icon(
-                    Icons.Rounded.ErrorOutline,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.size(16.dp),
-                )
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    text = message.error ?: "任务失败",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
-            }
-        }
-
-        if (message.status == MessageStatus.CANCELLED) {
-            Text(
-                text = "已中断",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 6.dp),
-            )
-        }
-
-        if (!isStreaming && message.content.isNotBlank()) {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
-                IconButton(onClick = { clipboard.setText(AnnotatedString(message.content)) }) {
+            if (message.status == MessageStatus.ERROR) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(top = 6.dp),
+                ) {
                     Icon(
-                        Icons.Rounded.ContentCopy,
-                        contentDescription = "复制",
+                        Icons.Rounded.ErrorOutline,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.error,
                         modifier = Modifier.size(16.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = message.error ?: "任务失败",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
                     )
                 }
-                message.usage?.let { usage ->
-                    if (usage.totalTokens > 0) {
-                        Spacer(Modifier.width(2.dp))
-                        Text(
-                            text = "${usage.totalTokens} tokens" +
-                                if (usage.cacheReadTokens > 0) " · 缓存 ${usage.cacheReadTokens}" else "",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.outline,
+            }
+
+            if (message.status == MessageStatus.CANCELLED) {
+                Text(
+                    text = "已中断",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+            }
+
+            if (!isStreaming && message.content.isNotBlank()) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 2.dp)) {
+                    IconButton(
+                        onClick = { clipboard.setText(AnnotatedString(message.content)) },
+                        modifier = Modifier.size(30.dp),
+                    ) {
+                        Icon(
+                            Icons.Rounded.ContentCopy,
+                            contentDescription = "复制",
+                            modifier = Modifier.size(15.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                    }
+                    message.usage?.let { usage ->
+                        if (usage.totalTokens > 0) {
+                            Spacer(Modifier.width(2.dp))
+                            Text(
+                                text = "${usage.totalTokens} tokens" +
+                                    if (usage.cacheReadTokens > 0) " · 缓存 ${usage.cacheReadTokens}" else "",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.outline,
+                            )
+                        }
                     }
                 }
             }
@@ -292,19 +332,20 @@ fun ToolCallsSection(events: List<ToolEvent>) {
             .fillMaxWidth()
             .clip(MaterialTheme.shapes.medium)
             .background(MaterialTheme.colorScheme.surfaceContainerHigh)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .padding(horizontal = 12.dp, vertical = 6.dp),
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(MaterialTheme.shapes.small)
-                .combinedClickable(onClick = { expanded = !expanded }),
+                .combinedClickable(onClick = { expanded = !expanded })
+                .padding(vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
                 Icons.Rounded.Build,
                 contentDescription = null,
-                modifier = Modifier.size(16.dp),
+                modifier = Modifier.size(15.dp),
                 tint = MaterialTheme.colorScheme.primary,
             )
             Spacer(Modifier.width(8.dp))
@@ -317,6 +358,7 @@ fun ToolCallsSection(events: List<ToolEvent>) {
             Icon(
                 if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
                 contentDescription = null,
+                modifier = Modifier.size(18.dp),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
@@ -387,46 +429,6 @@ private fun ToolEventRow(event: ToolEvent) {
 }
 
 @Composable
-private fun ReasoningSection(text: String) {
-    var expanded by remember { mutableStateOf(false) }
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(MaterialTheme.shapes.medium)
-            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .combinedClickable(onClick = { expanded = !expanded }),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = "思考过程",
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.weight(1f),
-            )
-            Icon(
-                if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(18.dp),
-            )
-        }
-        AnimatedVisibility(visible = expanded) {
-            Text(
-                text = text,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 6.dp),
-            )
-        }
-    }
-}
-
-@Composable
 fun AttachmentGrid(attachments: List<Attachment>) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         attachments.forEach { attachment ->
@@ -474,32 +476,8 @@ fun EmptyChatHint(
         modifier = modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Box(
-            modifier = Modifier
-                .size(72.dp)
-                .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.primary),
-            contentAlignment = Alignment.Center,
-        ) {
-            if (avatarPath.isNotBlank()) {
-                AsyncImage(
-                    model = java.io.File(avatarPath),
-                    contentDescription = null,
-                    modifier = Modifier
-                        .size(72.dp)
-                        .clip(CircleShape),
-                    contentScale = ContentScale.Crop,
-                )
-            } else {
-                Icon(
-                    Icons.Rounded.SmartToy,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onPrimary,
-                    modifier = Modifier.size(40.dp),
-                )
-            }
-        }
-        Spacer(Modifier.height(12.dp))
+        AssistantAvatar(avatarPath = avatarPath, size = 80.dp, iconSize = 44.dp)
+        Spacer(Modifier.height(14.dp))
         Text(
             text = assistantName.ifBlank { "Hermes" },
             style = MaterialTheme.typography.headlineMedium,
