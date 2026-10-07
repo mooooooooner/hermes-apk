@@ -56,8 +56,8 @@ interface MessageDao {
 
     @Query(
         "UPDATE messages SET content = :content, reasoning = :reasoning, status = :status, " +
-            "toolEvents = :toolEvents, error = :error, usage = :usage, updatedAt = :updatedAt " +
-            "WHERE id = :id",
+            "toolEvents = :toolEvents, segments = :segments, error = :error, usage = :usage, " +
+            "updatedAt = :updatedAt WHERE id = :id",
     )
     suspend fun updateProgress(
         id: Long,
@@ -65,6 +65,7 @@ interface MessageDao {
         reasoning: String,
         status: String,
         toolEvents: String,
+        segments: String,
         error: String?,
         usage: String?,
         updatedAt: Long,

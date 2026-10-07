@@ -33,12 +33,38 @@ data class AppSettings(
     val systemInstructions: String = "",
     val showReasoning: Boolean = true,
     val toolProgress: Boolean = true,
+    /** Display name of the assistant inside a conversation (local only). */
+    val assistantName: String = "Hermes",
+    /** Absolute path of the locally stored assistant avatar, or blank for the default icon. */
+    val assistantAvatarPath: String = "",
+    /** Base URL of the companion file service. Blank means "derive from [baseUrl]". */
+    val filesBaseUrl: String = "",
 ) {
     val isConfigured: Boolean
         get() = baseUrl.isNotBlank() && apiKey.isNotBlank()
 
+    /** Effective file-service base URL (explicit override, else derived from [baseUrl]). */
+    val effectiveFilesBaseUrl: String
+        get() = filesBaseUrl.trim().trimEnd('/').ifBlank { deriveFilesBaseUrl(baseUrl) }
+
     companion object {
         const val DEFAULT_BASE_URL = "https://test.monsoons.dev/hermes-api"
+
+        /**
+         * Given an API base URL, guess the companion file-service base URL. The server exposes
+         * `<origin>/hermes-api` and `<origin>/hermes-files`, so we swap that suffix; otherwise we
+         * append `/hermes-files`.
+         */
+        fun deriveFilesBaseUrl(baseUrl: String): String {
+            val trimmed = baseUrl.trim().trimEnd('/')
+            if (trimmed.isBlank()) return ""
+            for (suffix in listOf("/hermes-api", "/api")) {
+                if (trimmed.endsWith(suffix)) {
+                    return trimmed.removeSuffix(suffix) + "/hermes-files"
+                }
+            }
+            return trimmed + "/hermes-files"
+        }
     }
 }
 
@@ -61,6 +87,11 @@ class SettingsRepository @Inject constructor(
     var cachedApiKey: String = ""
         private set
 
+    /** Auth header for the companion file service (and Coil image loads). */
+    @Volatile
+    var cachedFilesBaseUrl: String = AppSettings.deriveFilesBaseUrl(AppSettings.DEFAULT_BASE_URL)
+        private set
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     val settings: Flow<AppSettings> = dataStore.data
@@ -69,6 +100,7 @@ class SettingsRepository @Inject constructor(
         .onEach { s ->
             cachedBaseUrl = s.baseUrl
             cachedApiKey = s.apiKey
+            cachedFilesBaseUrl = s.effectiveFilesBaseUrl
         }
         .distinctUntilChanged()
 
@@ -85,6 +117,8 @@ class SettingsRepository @Inject constructor(
         val trimmed = value.trim()
         dataStore.edit { it[KEY_BASE_URL] = trimmed }
         cachedBaseUrl = trimmed
+        val explicit = dataStore.data.first()[KEY_FILES_BASE_URL]?.trim().orEmpty()
+        cachedFilesBaseUrl = explicit.ifBlank { AppSettings.deriveFilesBaseUrl(trimmed) }
     }
 
     suspend fun setApiKey(value: String) {
@@ -108,6 +142,18 @@ class SettingsRepository @Inject constructor(
     suspend fun setToolProgress(value: Boolean) =
         dataStore.edit { it[KEY_TOOL_PROGRESS] = value }
 
+    suspend fun setAssistantName(value: String) =
+        dataStore.edit { it[KEY_ASSISTANT_NAME] = value.trim() }
+
+    suspend fun setAssistantAvatarPath(value: String) =
+        dataStore.edit { it[KEY_ASSISTANT_AVATAR] = value.trim() }
+
+    suspend fun setFilesBaseUrl(value: String) {
+        val trimmed = value.trim()
+        dataStore.edit { it[KEY_FILES_BASE_URL] = trimmed }
+        cachedFilesBaseUrl = trimmed.ifBlank { AppSettings.deriveFilesBaseUrl(cachedBaseUrl) }
+    }
+
     private fun Preferences.toSettings() = AppSettings(
         baseUrl = this[KEY_BASE_URL] ?: AppSettings.DEFAULT_BASE_URL,
         apiKey = this[KEY_API_KEY] ?: "",
@@ -117,6 +163,9 @@ class SettingsRepository @Inject constructor(
         systemInstructions = this[KEY_SYSTEM_INSTRUCTIONS] ?: "",
         showReasoning = this[KEY_SHOW_REASONING] ?: true,
         toolProgress = this[KEY_TOOL_PROGRESS] ?: true,
+        assistantName = this[KEY_ASSISTANT_NAME]?.takeIf { it.isNotBlank() } ?: "Hermes",
+        assistantAvatarPath = this[KEY_ASSISTANT_AVATAR] ?: "",
+        filesBaseUrl = this[KEY_FILES_BASE_URL] ?: "",
     )
 
     private companion object {
@@ -127,5 +176,8 @@ class SettingsRepository @Inject constructor(
         val KEY_SYSTEM_INSTRUCTIONS = stringPreferencesKey("system_instructions")
         val KEY_SHOW_REASONING = booleanPreferencesKey("show_reasoning")
         val KEY_TOOL_PROGRESS = booleanPreferencesKey("tool_progress")
+        val KEY_ASSISTANT_NAME = stringPreferencesKey("assistant_name")
+        val KEY_ASSISTANT_AVATAR = stringPreferencesKey("assistant_avatar_path")
+        val KEY_FILES_BASE_URL = stringPreferencesKey("files_base_url")
     }
 }

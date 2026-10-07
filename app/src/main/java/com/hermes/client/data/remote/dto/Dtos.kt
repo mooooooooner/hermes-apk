@@ -53,11 +53,10 @@ data class IdempotencySupport(
 
 /** POST /v1/runs */
 data class RunRequest(
-    @SerializedName("input") val input: String,
+    @SerializedName("input") val input: JsonElement,
     @SerializedName("session_id") val sessionId: String? = null,
     @SerializedName("instructions") val instructions: String? = null,
     @SerializedName("conversation_history") val conversationHistory: List<HistoryMessage>? = null,
-    @SerializedName("attachments") val attachments: List<AttachmentPayload>? = null,
 )
 
 data class HistoryMessage(
@@ -65,11 +64,26 @@ data class HistoryMessage(
     @SerializedName("content") val content: String,
 )
 
-data class AttachmentPayload(
-    @SerializedName("type") val type: String,
-    @SerializedName("name") val name: String,
-    @SerializedName("url") val url: String? = null,
-    @SerializedName("data") val data: String? = null,
+/** One OpenAI-style content part for multimodal input (`{"type":"text"|, "text":...}`). */
+data class InputTextPart(
+    @SerializedName("type") val type: String = "text",
+    @SerializedName("text") val text: String,
+)
+
+data class ImageUrl(
+    @SerializedName("url") val url: String,
+    @SerializedName("detail") val detail: String? = null,
+)
+
+data class InputImagePart(
+    @SerializedName("type") val type: String = "image_url",
+    @SerializedName("image_url") val imageUrl: ImageUrl,
+)
+
+/** A single user turn whose `content` may be a list of text/image parts. */
+data class InputUserMessage(
+    @SerializedName("role") val role: String = "user",
+    @SerializedName("content") val content: JsonElement,
 )
 
 data class RunCreatedDto(

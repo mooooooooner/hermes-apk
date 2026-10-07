@@ -1,7 +1,9 @@
 package com.hermes.client.ui.chat
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
+import androidx.core.content.FileProvider
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -12,7 +14,9 @@ import com.hermes.client.data.model.ChatSession
 import com.hermes.client.data.model.MessageStatus
 import com.hermes.client.data.prefs.AppSettings
 import com.hermes.client.data.prefs.SettingsRepository
+import com.hermes.client.data.remote.dto.CommandDto
 import com.hermes.client.data.repository.ChatRepository
+import com.hermes.client.data.repository.FileServiceRepository
 import com.hermes.client.data.repository.RunManager
 import com.hermes.client.data.repository.SessionRepository
 import com.hermes.client.ui.util.resolveFile
@@ -37,6 +41,7 @@ class ChatViewModel @Inject constructor(
     private val chatRepository: ChatRepository,
     private val sessionRepository: SessionRepository,
     private val runManager: RunManager,
+    private val fileService: FileServiceRepository,
     settingsRepository: SettingsRepository,
 ) : ViewModel() {
 
@@ -57,6 +62,9 @@ class ChatViewModel @Inject constructor(
     private val _attachments = MutableStateFlow<List<Attachment>>(emptyList())
     val attachments: StateFlow<List<Attachment>> = _attachments
 
+    private val _commands = MutableStateFlow(DEFAULT_COMMANDS)
+    val commands: StateFlow<List<CommandDto>> = _commands
+
     private val _events = MutableSharedFlow<String>(extraBufferCapacity = 4)
     val events: SharedFlow<String> = _events.asSharedFlow()
 
@@ -76,6 +84,11 @@ class ChatViewModel @Inject constructor(
             }?.runId
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    init {
+        // Slash-command list is served by the file service so it can be edited server-side.
+        refreshCommands()
+    }
 
     fun onInputChange(value: String) {
         _input.value = value
@@ -139,6 +152,47 @@ class ChatViewModel @Inject constructor(
         }
     }
 
+    fun refreshCommands() {
+        viewModelScope.launch {
+            val remote = fileService.commands()
+            if (remote.isNotEmpty()) _commands.value = remote
+        }
+    }
+
+    /** Open a delivered file/image: file-service URLs are downloaded (with auth) first. */
+    fun openMedia(url: String, name: String? = null) {
+        viewModelScope.launch {
+            if (!fileService.isFilesUrl(url)) {
+                runCatching {
+                    context.startActivity(
+                        Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    )
+                }.onFailure { emitError("无法打开链接") }
+                return@launch
+            }
+            _events.tryEmit("正在下载文件…")
+            val file = fileService.downloadToCache(url, name)
+            if (file == null) {
+                emitError("下载失败")
+                return@launch
+            }
+            val uri = FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                file,
+            )
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, context.contentResolver.getType(uri) ?: "*/*")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            val chooser = Intent.createChooser(intent, "打开文件")
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            runCatching { context.startActivity(chooser) }
+                .onFailure { emitError("没有可打开该文件的应用") }
+        }
+    }
+
     fun resend(messageId: Long) {
         viewModelScope.launch {
             chatRepository.resend(messageId)
@@ -159,5 +213,12 @@ class ChatViewModel @Inject constructor(
 
     private fun emitError(message: String) {
         _events.tryEmit(message)
+    }
+
+    private companion object {
+        val DEFAULT_COMMANDS = listOf(
+            CommandDto(name = "help", description = "显示可用命令", template = "/help"),
+            CommandDto(name = "status", description = "显示当前会话状态", template = "/status"),
+        )
     }
 }

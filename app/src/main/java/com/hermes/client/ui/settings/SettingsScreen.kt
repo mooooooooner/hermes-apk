@@ -1,6 +1,11 @@
 package com.hermes.client.ui.settings
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -11,10 +16,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.Button
@@ -28,6 +36,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -37,6 +46,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -44,6 +55,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import coil.compose.AsyncImage
 import com.hermes.client.BuildConfig
 import com.hermes.client.data.prefs.ThemeMode
 
@@ -55,14 +67,21 @@ fun SettingsRoute(
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val test by viewModel.test.collectAsStateWithLifecycle()
 
+    val avatarPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent(),
+    ) { uri -> uri?.let { viewModel.setAssistantAvatar(it) } }
+
     SettingsScreen(
         baseUrl = settings.baseUrl,
         apiKey = settings.apiKey,
+        filesBaseUrl = settings.filesBaseUrl.ifBlank { settings.effectiveFilesBaseUrl },
         themeMode = settings.themeMode,
         dynamicColor = settings.dynamicColor,
         systemInstructions = settings.systemInstructions,
         showReasoning = settings.showReasoning,
         toolProgress = settings.toolProgress,
+        assistantName = settings.assistantName,
+        assistantAvatarPath = settings.assistantAvatarPath,
         test = test,
         onBack = onBack,
         onSaveConnection = viewModel::saveConnection,
@@ -72,6 +91,10 @@ fun SettingsRoute(
         onDynamicColor = viewModel::setDynamicColor,
         onShowReasoning = viewModel::setShowReasoning,
         onToolProgress = viewModel::setToolProgress,
+        onAssistantName = viewModel::setAssistantName,
+        onPickAvatar = { avatarPicker.launch("image/*") },
+        onClearAvatar = viewModel::clearAssistantAvatar,
+        onSaveFilesBaseUrl = viewModel::setFilesBaseUrl,
         onClearTest = viewModel::clearTest,
     )
 }
@@ -81,11 +104,14 @@ fun SettingsRoute(
 fun SettingsScreen(
     baseUrl: String,
     apiKey: String,
+    filesBaseUrl: String,
     themeMode: ThemeMode,
     dynamicColor: Boolean,
     systemInstructions: String,
     showReasoning: Boolean,
     toolProgress: Boolean,
+    assistantName: String,
+    assistantAvatarPath: String,
     test: ConnectionTest,
     onBack: () -> Unit,
     onSaveConnection: (String, String) -> Unit,
@@ -95,11 +121,17 @@ fun SettingsScreen(
     onDynamicColor: (Boolean) -> Unit,
     onShowReasoning: (Boolean) -> Unit,
     onToolProgress: (Boolean) -> Unit,
+    onAssistantName: (String) -> Unit,
+    onPickAvatar: () -> Unit,
+    onClearAvatar: () -> Unit,
+    onSaveFilesBaseUrl: (String) -> Unit,
     onClearTest: () -> Unit,
 ) {
     var baseUrlField by remember(baseUrl) { mutableStateOf(baseUrl) }
     var apiKeyField by remember(apiKey) { mutableStateOf(apiKey) }
+    var filesUrlField by remember(filesBaseUrl) { mutableStateOf(filesBaseUrl) }
     var instructionsField by remember(systemInstructions) { mutableStateOf(systemInstructions) }
+    var assistantNameField by remember(assistantName) { mutableStateOf(assistantName) }
     var keyVisible by remember { mutableStateOf(false) }
 
     Scaffold(
@@ -189,6 +221,29 @@ fun SettingsScreen(
                 else -> Unit
             }
 
+            Spacer(Modifier.height(4.dp))
+            OutlinedTextField(
+                value = filesUrlField,
+                onValueChange = { filesUrlField = it },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("文件服务 Base URL") },
+                placeholder = { Text("https://example.com/hermes-files") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Uri,
+                    imeAction = ImeAction.Done,
+                ),
+            )
+            Text(
+                text = "用于图片/文件双向传输，留空则自动从 Base URL 推导。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Button(
+                onClick = { onSaveFilesBaseUrl(filesUrlField) },
+                enabled = filesUrlField != filesBaseUrl,
+            ) { Text("保存文件服务地址") }
+
             Spacer(Modifier.height(6.dp))
             SectionTitle("外观")
             Text(
@@ -247,6 +302,60 @@ fun SettingsScreen(
                 onClick = { onSaveInstructions(instructionsField) },
                 enabled = instructionsField != systemInstructions,
             ) { Text("保存系统指令") }
+
+            Spacer(Modifier.height(6.dp))
+            SectionTitle("助手")
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(64.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primary),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (assistantAvatarPath.isNotBlank()) {
+                        AsyncImage(
+                            model = java.io.File(assistantAvatarPath),
+                            contentDescription = null,
+                            modifier = Modifier
+                                .size(64.dp)
+                                .clip(CircleShape),
+                            contentScale = ContentScale.Crop,
+                        )
+                    } else {
+                        Icon(
+                            Icons.Rounded.Person,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onPrimary,
+                            modifier = Modifier.size(34.dp),
+                        )
+                    }
+                }
+                Spacer(Modifier.width(14.dp))
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Button(onClick = onPickAvatar) { Text("选择头像") }
+                    TextButton(
+                        onClick = onClearAvatar,
+                        enabled = assistantAvatarPath.isNotBlank(),
+                    ) { Text("恢复默认") }
+                }
+            }
+            OutlinedTextField(
+                value = assistantNameField,
+                onValueChange = { assistantNameField = it },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("助手名称") },
+                placeholder = { Text("Hermes") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+            )
+            Button(
+                onClick = { onAssistantName(assistantNameField) },
+                enabled = assistantNameField.trim() != assistantName.trim(),
+            ) { Text("保存名称") }
 
             Spacer(Modifier.height(6.dp))
             SectionTitle("关于")

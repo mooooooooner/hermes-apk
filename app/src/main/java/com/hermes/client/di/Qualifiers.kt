@@ -9,3 +9,7 @@ annotation class ApplicationScope
 @Qualifier
 @Retention(AnnotationRetention.BINARY)
 annotation class SseClient
+
+@Qualifier
+@Retention(AnnotationRetention.BINARY)
+annotation class FilesClient

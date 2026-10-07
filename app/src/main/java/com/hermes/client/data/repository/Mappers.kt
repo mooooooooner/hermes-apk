@@ -36,6 +36,7 @@ fun MessageEntity.toDomain(runState: RunState? = null) = ChatMessage(
     updatedAt = updatedAt,
     attachments = attachments,
     toolEvents = toolEvents,
+    segments = segments,
     error = error,
     usage = usage,
     runState = runState,

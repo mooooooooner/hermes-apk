@@ -1,5 +1,7 @@
 package com.hermes.client.ui.settings
 
+import android.content.Context
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.hermes.client.data.prefs.AppSettings
@@ -7,12 +9,16 @@ import com.hermes.client.data.prefs.SettingsRepository
 import com.hermes.client.data.prefs.ThemeMode
 import com.hermes.client.data.remote.HermesApi
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 import javax.inject.Inject
 
 sealed interface ConnectionTest {
@@ -24,6 +30,7 @@ sealed interface ConnectionTest {
 
 @HiltViewModel
 class SettingsViewModel @Inject constructor(
+    @ApplicationContext private val context: Context,
     private val settingsRepository: SettingsRepository,
     private val api: HermesApi,
 ) : ViewModel() {
@@ -60,6 +67,34 @@ class SettingsViewModel @Inject constructor(
 
     fun setToolProgress(enabled: Boolean) {
         viewModelScope.launch { settingsRepository.setToolProgress(enabled) }
+    }
+
+    fun setAssistantName(name: String) {
+        viewModelScope.launch { settingsRepository.setAssistantName(name) }
+    }
+
+    fun setFilesBaseUrl(value: String) {
+        viewModelScope.launch { settingsRepository.setFilesBaseUrl(value) }
+    }
+
+    /** Copy the picked image into app storage so it survives content-URI revocation. */
+    fun setAssistantAvatar(uri: Uri) {
+        viewModelScope.launch {
+            val path = withContext(Dispatchers.IO) {
+                runCatching {
+                    val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                        ?: return@runCatching null
+                    val file = File(context.filesDir, "assistant_avatar_${System.currentTimeMillis()}.img")
+                    file.writeBytes(bytes)
+                    file.absolutePath
+                }.getOrNull()
+            } ?: return@launch
+            settingsRepository.setAssistantAvatarPath(path)
+        }
+    }
+
+    fun clearAssistantAvatar() {
+        viewModelScope.launch { settingsRepository.setAssistantAvatarPath("") }
     }
 
     /** Persist the current form values first, then probe `GET /v1/models`. */

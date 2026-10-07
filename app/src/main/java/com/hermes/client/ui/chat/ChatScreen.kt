@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -23,8 +24,10 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Send
@@ -70,6 +73,7 @@ import com.hermes.client.data.model.Attachment
 import com.hermes.client.data.model.AttachmentKind
 import com.hermes.client.data.model.ChatMessage
 import com.hermes.client.data.model.MessageRole
+import com.hermes.client.data.remote.dto.CommandDto
 
 @Composable
 fun ChatRoute(
@@ -82,6 +86,7 @@ fun ChatRoute(
     val attachments by viewModel.attachments.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val isRunning by viewModel.isRunning.collectAsStateWithLifecycle()
+    val commands by viewModel.commands.collectAsStateWithLifecycle()
 
     val snackbarHostState = remember { SnackbarHostState() }
     LaunchedEffect(Unit) {
@@ -99,6 +104,9 @@ fun ChatRoute(
         attachments = attachments,
         isRunning = isRunning,
         showReasoning = settings.showReasoning,
+        assistantName = settings.assistantName,
+        assistantAvatarPath = settings.assistantAvatarPath,
+        commands = commands,
         snackbarHostState = snackbarHostState,
         onBack = onBack,
         onInputChange = viewModel::onInputChange,
@@ -111,6 +119,7 @@ fun ChatRoute(
         onResend = viewModel::resend,
         onEditAndResend = viewModel::editAndResend,
         onDelete = viewModel::deleteMessage,
+        onOpenMedia = viewModel::openMedia,
     )
 }
 
@@ -123,6 +132,9 @@ fun ChatScreen(
     attachments: List<Attachment>,
     isRunning: Boolean,
     showReasoning: Boolean,
+    assistantName: String,
+    assistantAvatarPath: String,
+    commands: List<CommandDto>,
     snackbarHostState: SnackbarHostState,
     onBack: () -> Unit,
     onInputChange: (String) -> Unit,
@@ -135,6 +147,7 @@ fun ChatScreen(
     onResend: (Long) -> Unit,
     onEditAndResend: (Long, String) -> Unit,
     onDelete: (Long) -> Unit,
+    onOpenMedia: (String) -> Unit,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
     var renameDialog by remember { mutableStateOf(false) }
@@ -149,6 +162,17 @@ fun ChatScreen(
             val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
             if (lastVisible >= messages.lastIndex - 2) listState.scrollToItem(messages.lastIndex)
         }
+    }
+
+    // Show slash-command suggestions while the user is typing a bare "/name" token.
+    val commandQuery = if (input.startsWith("/") && !input.contains(' ') && !input.contains('\n')) {
+        input.drop(1)
+    } else {
+        null
+    }
+    val filteredCommands = remember(commands, commandQuery) {
+        if (commandQuery == null) emptyList()
+        else commands.filter { it.name.contains(commandQuery, ignoreCase = true) }
     }
 
     Scaffold(
@@ -207,6 +231,8 @@ fun ChatScreen(
                         modifier = Modifier
                             .align(Alignment.Center)
                             .padding(32.dp),
+                        assistantName = assistantName,
+                        avatarPath = assistantAvatarPath,
                     )
                 } else {
                     LazyColumn(
@@ -226,6 +252,9 @@ fun ChatScreen(
                                 else -> AssistantMessage(
                                     message = message,
                                     showReasoning = showReasoning,
+                                    assistantName = assistantName,
+                                    avatarPath = assistantAvatarPath,
+                                    onOpenMedia = onOpenMedia,
                                 )
                             }
                         }
@@ -240,13 +269,24 @@ fun ChatScreen(
                 )
             }
 
+            if (commandQuery != null && filteredCommands.isNotEmpty()) {
+                CommandSuggestions(
+                    commands = filteredCommands,
+                    onSelect = { command ->
+                        onInputChange(command.template?.takeIf { it.isNotBlank() } ?: "/${command.name}")
+                    },
+                )
+            }
+
             ChatInputBar(
                 input = input,
                 isRunning = isRunning,
+                assistantName = assistantName,
                 onInputChange = onInputChange,
                 onSend = onSend,
                 onStop = onStop,
                 onPickFiles = onPickFiles,
+                onSlash = { onInputChange("/") },
             )
         }
     }
@@ -336,10 +376,12 @@ private fun AttachmentStrip(
 private fun ChatInputBar(
     input: String,
     isRunning: Boolean,
+    assistantName: String = "Hermes",
     onInputChange: (String) -> Unit,
     onSend: () -> Unit,
     onStop: () -> Unit,
     onPickFiles: () -> Unit,
+    onSlash: () -> Unit,
 ) {
     Surface(
         color = MaterialTheme.colorScheme.background,
@@ -359,10 +401,19 @@ private fun ChatInputBar(
                 value = input,
                 onValueChange = onInputChange,
                 modifier = Modifier.weight(1f),
-                placeholder = { Text("给 Hermes 发消息…") },
+                placeholder = { Text("给 ${assistantName.ifBlank { "Hermes" }} 发消息…") },
                 maxLines = 6,
                 shape = MaterialTheme.shapes.large,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
+                trailingIcon = {
+                    IconButton(onClick = onSlash) {
+                        Text(
+                            text = "/",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                },
             )
             Spacer(Modifier.width(6.dp))
             if (isRunning) {
@@ -382,6 +433,46 @@ private fun ChatInputBar(
                 enabled = input.isNotBlank(),
             ) {
                 Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = "发送")
+            }
+        }
+    }
+}
+
+@Composable
+private fun CommandSuggestions(
+    commands: List<CommandDto>,
+    onSelect: (CommandDto) -> Unit,
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        shape = MaterialTheme.shapes.medium,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+    ) {
+        Column(modifier = Modifier.heightIn(max = 260.dp).verticalScroll(rememberScrollState())) {
+            commands.forEach { command ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onSelect(command) }
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "/${command.name}",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        text = command.description.orEmpty(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
         }
     }

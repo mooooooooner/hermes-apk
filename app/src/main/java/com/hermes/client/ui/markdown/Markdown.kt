@@ -1,6 +1,8 @@
 package com.hermes.client.ui.markdown
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -8,6 +10,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -15,7 +18,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AttachFile
 import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -25,7 +30,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
@@ -38,6 +46,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import coil.compose.AsyncImage
 import com.hermes.client.ui.theme.CodeBackgroundDark
 import com.hermes.client.ui.theme.CodeBackgroundLight
 import com.hermes.client.ui.theme.CodeTextStyle
@@ -61,9 +70,14 @@ sealed interface MdBlock {
     data class Quote(val text: String) : MdBlock
     data object Divider : MdBlock
     data class Table(val header: List<String>, val rows: List<List<String>>) : MdBlock
+    data class Image(val alt: String, val url: String) : MdBlock
+    data class Media(val path: String) : MdBlock
 }
 
 object MarkdownParser {
+
+    private val IMAGE_LINE = Regex("^!\\[([^\\]]*)\\]\\((\\S+)\\)$")
+    private val MEDIA_LINE = Regex("^MEDIA:(\\S+)$")
 
     fun parse(source: String): List<MdBlock> {
         val lines = source.replace("\r\n", "\n").split("\n")
@@ -111,6 +125,19 @@ object MarkdownParser {
                 isDivider(line) -> {
                     flushParagraph()
                     blocks += MdBlock.Divider
+                    i++
+                }
+
+                MEDIA_LINE.matches(line.trim()) -> {
+                    flushParagraph()
+                    blocks += MdBlock.Media(MEDIA_LINE.find(line.trim())!!.groupValues[1])
+                    i++
+                }
+
+                IMAGE_LINE.matches(line.trim()) -> {
+                    flushParagraph()
+                    val match = IMAGE_LINE.find(line.trim())!!
+                    blocks += MdBlock.Image(match.groupValues[1], match.groupValues[2])
                     i++
                 }
 
@@ -275,6 +302,7 @@ fun MarkdownText(
     text: String,
     modifier: Modifier = Modifier,
     color: Color = MaterialTheme.colorScheme.onSurface,
+    onOpenMedia: ((String) -> Unit)? = null,
 ) {
     val blocks = remember(text) { MarkdownParser.parse(text) }
     SelectionContainer {
@@ -336,6 +364,8 @@ fun MarkdownText(
                     )
 
                     is MdBlock.Table -> TableBlock(block, color)
+                    is MdBlock.Image -> ImageBlock(block.alt, block.url, onOpenMedia)
+                    is MdBlock.Media -> MediaChip(block.path, onOpenMedia)
                 }
             }
         }
@@ -376,6 +406,91 @@ private fun TableBlock(table: MdBlock.Table, color: Color) {
         }
     }
 }
+
+@Composable
+private fun ImageBlock(alt: String, url: String, onOpenMedia: ((String) -> Unit)? = null) {
+    val modifier = Modifier
+        .fillMaxWidth()
+        .clip(RoundedCornerShape(10.dp))
+        .let { if (onOpenMedia != null && !url.startsWith("data:")) it.clickable { onOpenMedia(url) } else it }
+    if (url.startsWith("data:")) {
+        val bitmap = remember(url) { decodeDataUrl(url) }
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap.asImageBitmap(),
+                contentDescription = alt.ifBlank { "图片" },
+                modifier = modifier,
+                contentScale = ContentScale.FillWidth,
+            )
+        } else {
+            Text(
+                text = alt.ifBlank { "[图片]" },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    } else {
+        AsyncImage(
+            model = url,
+            contentDescription = alt.ifBlank { "图片" },
+            modifier = modifier,
+            contentScale = ContentScale.FillWidth,
+        )
+    }
+}
+
+@Composable
+private fun MediaChip(path: String, onOpenMedia: ((String) -> Unit)? = null) {
+    val name = path.substringAfterLast('/').ifBlank { path }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
+            .let {
+                if (onOpenMedia != null) it.clickable { onOpenMedia(path) } else it
+            }
+            .padding(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = Icons.Rounded.AttachFile,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(18.dp),
+        )
+        Spacer(Modifier.width(8.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = name,
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                text = path,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.outline,
+            )
+        }
+        if (onOpenMedia != null && !path.startsWith("/")) {
+            Icon(
+                imageVector = Icons.Rounded.Download,
+                contentDescription = "下载",
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+    }
+}
+
+private fun decodeDataUrl(url: String): android.graphics.Bitmap? = runCatching {
+    val comma = url.indexOf(',')
+    if (comma < 0) return null
+    val meta = url.substring(5, comma)
+    if (!meta.contains(";base64")) return null
+    val bytes = android.util.Base64.decode(url.substring(comma + 1), android.util.Base64.DEFAULT)
+    android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+}.getOrNull()
 
 @Composable
 fun CodeBlock(code: String, lang: String?) {

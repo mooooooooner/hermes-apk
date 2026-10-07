@@ -45,6 +45,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -155,6 +156,9 @@ fun UserMessage(
 fun AssistantMessage(
     message: ChatMessage,
     showReasoning: Boolean,
+    assistantName: String = "Hermes",
+    avatarPath: String = "",
+    onOpenMedia: ((String) -> Unit)? = null,
 ) {
     val clipboard = LocalClipboardManager.current
     val isStreaming = message.status == MessageStatus.STREAMING || message.status == MessageStatus.PENDING
@@ -162,55 +166,65 @@ fun AssistantMessage(
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
                 modifier = Modifier
-                    .size(26.dp)
+                    .size(36.dp)
                     .clip(CircleShape)
                     .background(MaterialTheme.colorScheme.primary),
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(
-                    Icons.Rounded.SmartToy,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onPrimary,
-                    modifier = Modifier.size(16.dp),
-                )
+                if (avatarPath.isNotBlank()) {
+                    AsyncImage(
+                        model = java.io.File(avatarPath),
+                        contentDescription = null,
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape),
+                        contentScale = ContentScale.Crop,
+                    )
+                } else {
+                    Icon(
+                        Icons.Rounded.SmartToy,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onPrimary,
+                        modifier = Modifier.size(21.dp),
+                    )
+                }
             }
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.width(10.dp))
             Text(
-                text = "Hermes",
-                style = MaterialTheme.typography.titleSmall,
+                text = assistantName.ifBlank { "Hermes" },
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
         Spacer(Modifier.height(8.dp))
 
-        if (message.toolEvents.isNotEmpty()) {
-            ToolCallsSection(message.toolEvents)
-            Spacer(Modifier.height(8.dp))
-        }
-
-        if (showReasoning && message.reasoning.isNotBlank()) {
-            ReasoningSection(message.reasoning)
-            Spacer(Modifier.height(8.dp))
-        }
-
-        when {
-            isStreaming && message.content.isBlank() -> {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    TypingDots()
-                    Spacer(Modifier.width(10.dp))
-                    Text(
-                        text = message.toolEvents.lastOrNull()?.let { "正在执行 ${it.name}" } ?: "思考中",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            message.renderSegments.forEach { segment ->
+                if (showReasoning && segment.reasoning.isNotBlank()) {
+                    ReasoningSection(segment.reasoning)
+                }
+                if (segment.tools.isNotEmpty()) {
+                    ToolCallsSection(segment.tools)
+                }
+                if (segment.text.isNotBlank()) {
+                    MarkdownText(text = segment.text, onOpenMedia = onOpenMedia)
                 }
             }
 
-            message.content.isNotBlank() -> {
-                MarkdownText(text = message.content)
-                if (isStreaming) {
-                    Spacer(Modifier.height(6.dp))
+            if (isStreaming) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     TypingDots()
+                    if (message.renderSegments.none { it.text.isNotBlank() }) {
+                        Spacer(Modifier.width(10.dp))
+                        val label = message.renderSegments.lastOrNull()?.tools?.lastOrNull()
+                            ?.let { "正在执行 ${it.name}" } ?: "思考中"
+                        Text(
+                            text = label,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
         }
@@ -451,13 +465,43 @@ fun AttachmentGrid(attachments: List<Attachment>) {
 }
 
 @Composable
-fun EmptyChatHint(modifier: Modifier = Modifier) {
+fun EmptyChatHint(
+    modifier: Modifier = Modifier,
+    assistantName: String = "Hermes",
+    avatarPath: String = "",
+) {
     Column(
         modifier = modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
+        Box(
+            modifier = Modifier
+                .size(72.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.primary),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (avatarPath.isNotBlank()) {
+                AsyncImage(
+                    model = java.io.File(avatarPath),
+                    contentDescription = null,
+                    modifier = Modifier
+                        .size(72.dp)
+                        .clip(CircleShape),
+                    contentScale = ContentScale.Crop,
+                )
+            } else {
+                Icon(
+                    Icons.Rounded.SmartToy,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onPrimary,
+                    modifier = Modifier.size(40.dp),
+                )
+            }
+        }
+        Spacer(Modifier.height(12.dp))
         Text(
-            text = "Hermes",
+            text = assistantName.ifBlank { "Hermes" },
             style = MaterialTheme.typography.headlineMedium,
             fontWeight = FontWeight.Bold,
         )

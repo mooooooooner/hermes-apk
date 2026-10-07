@@ -3,6 +3,10 @@ package com.hermes.client.data.repository
 import android.content.Context
 import android.net.Uri
 import android.util.Base64
+import com.google.gson.JsonArray
+import com.google.gson.JsonElement
+import com.google.gson.JsonObject
+import com.google.gson.JsonPrimitive
 import com.hermes.client.data.local.HermesDatabase
 import com.hermes.client.data.local.MessageEntity
 import com.hermes.client.data.local.RunEntity
@@ -12,10 +16,10 @@ import com.hermes.client.data.model.ChatMessage
 import com.hermes.client.data.model.MessageRole
 import com.hermes.client.data.model.MessageStatus
 import com.hermes.client.data.model.RunState
+import com.hermes.client.data.prefs.AppSettings
 import com.hermes.client.data.remote.HermesApi
-import com.hermes.client.data.remote.dto.AttachmentPayload
-import com.hermes.client.data.remote.dto.HistoryMessage
 import com.hermes.client.data.remote.dto.RunRequest
+import com.hermes.client.data.remote.dto.UploadedFileDto
 import com.hermes.client.data.prefs.SettingsRepository
 import com.hermes.client.worker.WorkScheduler
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -39,6 +43,7 @@ class ChatRepository @Inject constructor(
     private val db: HermesDatabase,
     private val settings: SettingsRepository,
     private val runManager: RunManager,
+    private val fileService: FileServiceRepository,
     private val workScheduler: WorkScheduler,
 ) {
     private val messageDao get() = db.messageDao()
@@ -135,12 +140,14 @@ class ChatRepository @Inject constructor(
             )
 
             val settingsSnapshot = settings.snapshot()
-            val built = buildInput(text, attachments)
+            // Ship attachments to the file service so the agent can read them by local path. Only
+            // the ones that fail to upload fall back to being inlined in the run input.
+            val (uploaded, failed) = uploadAttachments(attachments)
+            val input = buildInput(text, failed)
             val request = RunRequest(
-                input = built.text,
+                input = input,
                 sessionId = sessionId,
-                instructions = settingsSnapshot.systemInstructions.ifBlank { null },
-                attachments = built.payloads.ifEmpty { null },
+                instructions = buildInstructions(settingsSnapshot, uploaded),
             )
             val created = api.createRun(request, idempotencyKey = UUID.randomUUID().toString())
 
@@ -180,6 +187,43 @@ class ChatRepository @Inject constructor(
         }
     }
 
+    private suspend fun uploadAttachments(
+        attachments: List<Attachment>,
+    ): Pair<List<UploadedFileDto>, List<Attachment>> {
+        if (attachments.isEmpty()) return emptyList<UploadedFileDto>() to emptyList()
+        val uploaded = mutableListOf<UploadedFileDto>()
+        val failed = mutableListOf<Attachment>()
+        attachments.forEach { attachment ->
+            val result = fileService.upload(attachment)
+            if (result?.path != null) uploaded += result else failed += attachment
+        }
+        return uploaded to failed
+    }
+
+    /** Ephemeral system prompt: user instructions + how to read uploaded files / send files back. */
+    private fun buildInstructions(
+        settingsSnapshot: AppSettings,
+        uploaded: List<UploadedFileDto>,
+    ): String? {
+        val parts = mutableListOf<String>()
+        if (settingsSnapshot.systemInstructions.isNotBlank()) {
+            parts += settingsSnapshot.systemInstructions.trim()
+        }
+        if (uploaded.isNotEmpty()) {
+            val list = uploaded.joinToString("\n") {
+                "- ${it.name ?: it.id}（${it.mime ?: "application/octet-stream"}, ${it.size} 字节）：${it.path}"
+            }
+            parts += "【用户上传的文件】用户本次消息附带了以下文件，已保存到服务器本机。请直接用文件工具读取其绝对路径来分析，不要凭猜测回答：\n$list"
+        }
+        val filesBase = settingsSnapshot.effectiveFilesBaseUrl
+        if (filesBase.isNotBlank() && settingsSnapshot.apiKey.isNotBlank()) {
+            parts += "【向用户发送文件/图片】当你需要把生成的图片或文件发给用户时，先写入磁盘，再用 terminal 执行：\n" +
+                "curl -s -F 'file=@<文件的绝对路径>' -H 'Authorization: Bearer ${settingsSnapshot.apiKey}' '$filesBase/upload'\n" +
+                "响应 JSON 中的 url 字段就是用户可访问的地址。图片请用 Markdown 图片语法 ![说明](url) 直接展示；其它文件请单独一行输出 MEDIA:url 。"
+        }
+        return parts.joinToString("\n\n").ifBlank { null }
+    }
+
     suspend fun fetchHistory(sessionId: String): Result<Int> = withContext(Dispatchers.IO) {
         runCatching {
             // Replacing the local messages would orphan the row that an in-flight stream writes
@@ -191,34 +235,13 @@ class ChatRepository @Inject constructor(
 
             val response = api.sessionMessages(sessionId)
             if (response.data.isEmpty()) return@runCatching 0
-            // Server is authoritative: replace the local cache with the server transcript.
+            // Server is authoritative: replace the local cache, but rebuild it in the same shape
+            // the streaming path produces so the format does not change after a manual sync.
+            val previous = messageDao.list(sessionId)
+            val entities = HistoryFolder.fold(sessionId, response.data, previous)
             messageDao.deleteForSession(sessionId)
-            val startSeq = (messageDao.maxSeq(sessionId) ?: 0)
-            response.data.forEachIndexed { index, server ->
-                val role = when (server.role) {
-                    "user" -> MessageRole.USER.name
-                    "assistant" -> MessageRole.ASSISTANT.name
-                    "tool" -> MessageRole.TOOL.name
-                    "system" -> MessageRole.SYSTEM.name
-                    else -> MessageRole.ASSISTANT.name
-                }
-                messageDao.insert(
-                    MessageEntity(
-                        sessionId = sessionId,
-                        role = role,
-                        content = server.content.contentToText(),
-                        reasoning = server.reasoning ?: server.reasoningContent.orEmpty(),
-                        status = MessageStatus.COMPLETE.name,
-                        seq = startSeq + index + 1,
-                        createdAt = ((server.timestamp ?: 0.0) * 1000).toLong()
-                            .takeIf { it > 0 } ?: System.currentTimeMillis(),
-                        updatedAt = System.currentTimeMillis(),
-                        attachments = server.content.contentToAttachments(),
-                        serverId = server.id,
-                    ),
-                )
-            }
-            response.data.size
+            entities.forEach { messageDao.insert(it) }
+            entities.size
         }
     }
 
@@ -226,60 +249,75 @@ class ChatRepository @Inject constructor(
         messageDao.delete(messageId)
     }
 
-    private data class BuiltInput(
-        val text: String,
-        val payloads: List<AttachmentPayload>,
-    )
-
+    /**
+     * Build the `POST /v1/runs` `input` payload for attachments that could **not** be uploaded to
+     * the file service (offline / unsupported). Images become native OpenAI-style `image_url`
+     * content parts; text files are inlined as fenced text. With no attachments the input stays a
+     * plain string.
+     */
     private suspend fun buildInput(
         text: String,
         attachments: List<Attachment>,
-    ): BuiltInput = withContext(Dispatchers.IO) {
-        if (attachments.isEmpty()) return@withContext BuiltInput(text, emptyList())
-        val blocks = mutableListOf<String>()
-        val payloads = mutableListOf<AttachmentPayload>()
+    ): JsonElement = withContext(Dispatchers.IO) {
+        if (attachments.isEmpty()) return@withContext JsonPrimitive(text)
+
+        val textBlocks = mutableListOf<String>()
+        val imageParts = mutableListOf<JsonElement>()
+
         attachments.forEach { attachment ->
-            val bytes = runCatching { readBytes(Uri.parse(attachment.uri)) }.getOrNull() ?: return@forEach
+            val bytes = runCatching { readBytes(Uri.parse(attachment.uri)) }.getOrNull()
+                ?: return@forEach
             when {
-                attachment.mimeType.startsWith("text/") || attachment.mimeType == "application/json" -> {
-                    val body = String(bytes, Charsets.UTF_8).take(MAX_TEXT_CHARS)
-                    blocks += "附件 `${attachment.name}`:\n```\n$body\n```"
-                    payloads += AttachmentPayload(
-                        type = attachment.mimeType,
-                        name = attachment.name,
-                        data = Base64.encodeToString(body.toByteArray(), Base64.NO_WRAP),
-                    )
+                attachment.kind == AttachmentKind.IMAGE -> {
+                    val mime = attachment.mimeType.ifBlank { "image/png" }
+                    val dataUrl = "data:$mime;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP)
+                    imageParts += JsonObject().apply {
+                        addProperty("type", "image_url")
+                        add("image_url", JsonObject().apply {
+                            addProperty("url", dataUrl)
+                            addProperty("detail", "auto")
+                        })
+                    }
                 }
 
-                attachment.kind == AttachmentKind.IMAGE -> {
-                    val dataUrl = "data:${attachment.mimeType};base64," +
-                        Base64.encodeToString(bytes, Base64.NO_WRAP)
-                    blocks += "![${attachment.name}]($dataUrl)"
-                    payloads += AttachmentPayload(
-                        type = attachment.mimeType,
-                        name = attachment.name,
-                        data = dataUrl,
-                    )
+                attachment.mimeType.startsWith("text/") || attachment.mimeType == "application/json" -> {
+                    val body = String(bytes, Charsets.UTF_8).take(MAX_TEXT_CHARS)
+                    textBlocks += "附件 `${attachment.name}`:\n```\n$body\n```"
                 }
 
                 else -> {
-                    blocks += "（已附加文件 `${attachment.name}`，${attachment.size} 字节）"
-                    payloads += AttachmentPayload(
-                        type = attachment.mimeType,
-                        name = attachment.name,
-                        data = Base64.encodeToString(bytes, Base64.NO_WRAP),
-                    )
+                    textBlocks += "（已附加文件 `${attachment.name}`，${attachment.size} 字节；上传失败，请让用户重新发送或提供可访问的 URL）"
                 }
             }
         }
+
         val combined = buildString {
             append(text)
-            if (blocks.isNotEmpty()) {
-                if (isNotEmpty()) append("\n\n")
-                append(blocks.joinToString("\n\n"))
+            if (textBlocks.isNotEmpty()) {
+                if (isNotBlank()) append("\n\n")
+                append(textBlocks.joinToString("\n\n"))
             }
         }
-        BuiltInput(combined, payloads)
+
+        if (imageParts.isEmpty()) {
+            JsonPrimitive(combined)
+        } else {
+            // `input` as a list of messages: the server reads only the *last* message's content as
+            // the user turn (earlier entries would be treated as history), so we send exactly one.
+            val content = JsonArray().apply {
+                add(JsonObject().apply {
+                    addProperty("type", "text")
+                    addProperty("text", combined.ifBlank { "请查看附件。" })
+                })
+                imageParts.forEach { add(it) }
+            }
+            JsonArray().apply {
+                add(JsonObject().apply {
+                    addProperty("role", "user")
+                    add("content", content)
+                })
+            }
+        }
     }
 
     private fun readBytes(uri: Uri): ByteArray? =

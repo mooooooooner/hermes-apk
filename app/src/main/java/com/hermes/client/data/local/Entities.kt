@@ -4,6 +4,7 @@ import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
 import com.hermes.client.data.model.Attachment
+import com.hermes.client.data.model.MessageSegment
 import com.hermes.client.data.model.MessageStatus
 import com.hermes.client.data.model.ToolEvent
 import com.hermes.client.data.model.Usage
@@ -36,6 +37,7 @@ data class MessageEntity(
     val updatedAt: Long = 0,
     val attachments: List<Attachment> = emptyList(),
     val toolEvents: List<ToolEvent> = emptyList(),
+    val segments: List<MessageSegment> = emptyList(),
     val error: String? = null,
     val usage: Usage? = null,
     val serverId: Long? = null,
