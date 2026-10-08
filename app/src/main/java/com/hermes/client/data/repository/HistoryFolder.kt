@@ -84,7 +84,76 @@ object HistoryFolder {
             }
         }
         flushAssistant()
-        return entities
+        return mergeLocalOnlyTurns(serverEntities = entities, previous = previous)
+    }
+
+    /**
+     * Keep the turns the server transcript does not contain. A slash command is answered
+     * server-side **without an agent turn**, so it is never written to the session transcript. A
+     * plain "server is authoritative" replace would therefore erase the command and its reply the
+     * moment the automatic post-run sync runs. Re-insert those local-only turns in their original
+     * position so a sync (automatic or manual) leaves the conversation unchanged.
+     */
+    private fun mergeLocalOnlyTurns(
+        serverEntities: List<MessageEntity>,
+        previous: List<MessageEntity>,
+    ): List<MessageEntity> {
+        val localTurns = groupTurns(previous)
+        // Fast path: with nothing but persisted turns the server transcript stays authoritative.
+        if (localTurns.none { it.firstOrNull()?.startsWithSlashCommand() == true }) {
+            return serverEntities
+        }
+        val serverTurns = groupTurns(serverEntities)
+        val merged = mutableListOf<MessageEntity>()
+        var s = 0
+        for (turn in localTurns) {
+            val serverTurn = serverTurns.getOrNull(s)
+            when {
+                isLocalOnlyTurn(turn, serverTurn) -> merged += turn
+                serverTurn != null -> {
+                    merged += serverTurn
+                    s++
+                }
+
+                else -> merged += turn
+            }
+        }
+        while (s < serverTurns.size) {
+            merged += serverTurns[s]
+            s++
+        }
+        return merged.mapIndexed { index, entity ->
+            if (entity.seq == index + 1) entity else entity.copy(seq = index + 1)
+        }
+    }
+
+    /** A turn is a user message plus everything after it up to (not including) the next user message. */
+    private fun groupTurns(messages: List<MessageEntity>): List<List<MessageEntity>> {
+        val turns = mutableListOf<MutableList<MessageEntity>>()
+        messages.forEach { message ->
+            if (message.role == MessageRole.USER.name || turns.isEmpty()) {
+                turns += mutableListOf(message)
+            } else {
+                turns.last() += message
+            }
+        }
+        return turns
+    }
+
+    private fun MessageEntity.startsWithSlashCommand(): Boolean =
+        role == MessageRole.USER.name && content.trimStart().startsWith("/")
+
+    private fun isLocalOnlyTurn(
+        localTurn: List<MessageEntity>,
+        serverTurn: List<MessageEntity>?,
+    ): Boolean {
+        val localUser = localTurn.firstOrNull() ?: return false
+        if (!localUser.startsWithSlashCommand()) return false
+        val serverUser = serverTurn?.firstOrNull()
+        // The server *did* persist this turn (e.g. an unknown "/foo" still goes through the model)
+        // when its user text matches; only a real server-side command leaves no transcript row.
+        return serverUser == null || serverUser.role != MessageRole.USER.name ||
+            serverUser.content.trim() != localUser.content.trim()
     }
 
     private fun buildSegments(messages: List<ServerMessage>): List<MessageSegment> {
