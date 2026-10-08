@@ -244,10 +244,25 @@ class ChatRepository @Inject constructor(
             parts += settingsSnapshot.systemInstructions.trim()
         }
         if (uploaded.isNotEmpty()) {
-            val list = uploaded.joinToString("\n") {
-                "- ${it.name ?: it.id}（${it.mime ?: "application/octet-stream"}, ${it.size} 字节）：${it.path}"
+            val audio = uploaded.filter { isAudio(it) }
+            val files = uploaded.filterNot { isAudio(it) }
+            if (files.isNotEmpty()) {
+                val list = files.joinToString("\n") {
+                    "- ${it.name ?: it.id}（${it.mime ?: "application/octet-stream"}, ${it.size} 字节）：${it.path}"
+                }
+                parts += "【用户上传的文件】用户本次消息附带了以下文件，已保存到服务器本机。请直接用文件工具读取其绝对路径来分析，不要凭猜测回答：\n$list"
             }
-            parts += "【用户上传的文件】用户本次消息附带了以下文件，已保存到服务器本机。请直接用文件工具读取其绝对路径来分析，不要凭猜测回答：\n$list"
+            if (audio.isNotEmpty()) {
+                val list = audio.joinToString("\n") {
+                    "- ${it.name ?: it.id}（${it.mime ?: "audio"}）：${it.path}"
+                }
+                parts += "【用户语音消息】用户用语音发来了内容，音频文件已保存在服务器本机。请务必先用 Hermes " +
+                    "自带的语音转写能力把音频转成文字，再据此理解并回答用户（不要忽略，也不要凭空猜测内容）。\n" +
+                    "转写方法（在终端执行）：\n" +
+                    "cd /usr/local/lib/hermes-agent && ./venv/bin/python -c \"import sys; sys.path.insert(0,'.'); " +
+                    "from tools.transcription_tools import transcribe_audio; print(transcribe_audio('<音频绝对路径>'))\"\n" +
+                    "音频路径如下：\n$list"
+            }
         }
         val filesBase = settingsSnapshot.effectiveFilesBaseUrl
         if (filesBase.isNotBlank() && settingsSnapshot.apiKey.isNotBlank()) {
@@ -256,6 +271,14 @@ class ChatRepository @Inject constructor(
                 "响应 JSON 中的 url 字段就是用户可访问的地址。图片请用 Markdown 图片语法 ![说明](url) 直接展示；其它文件请单独一行输出 MEDIA:url 。"
         }
         return parts.joinToString("\n\n").ifBlank { null }
+    }
+
+    private fun isAudio(file: UploadedFileDto): Boolean {
+        if (file.mime?.lowercase()?.startsWith("audio/") == true) return true
+        val name = file.name?.lowercase().orEmpty()
+        return name.endsWith(".m4a") || name.endsWith(".mp3") || name.endsWith(".aac") ||
+            name.endsWith(".wav") || name.endsWith(".ogg") || name.endsWith(".opus") ||
+            name.endsWith(".webm") || name.endsWith(".flac")
     }
 
     suspend fun fetchHistory(sessionId: String): Result<Int> = withContext(Dispatchers.IO) {

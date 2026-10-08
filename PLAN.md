@@ -85,3 +85,12 @@
 - **中断兜底**：`ChatViewModel` 保留发送协程 `submitJob`；`stop()` 在没有 runId 时取消该协程并调用 `ChatRepository.cancelPending()`，把无 run 的占位置为 `CANCELLED`（UI 显示「已中断」）。
 - **提交重构**：`submit()` 用 `try/catch/finally`：`CancellationException` 原样抛出、其它异常把占位置 `ERROR`、`finally` 清除 in-flight 标记；错误定位改用占位 id，不再靠「最后一条 runId 为空的助手消息」猜测。
 - 已实测：注入 `PENDING`+`runId=null` 行 → 重开自动变 `ERROR`；黑洞网络下发送卡住 → 点「中断」立即变 `CANCELLED`，按钮恢复为麦克风。
+
+### 本批次（语音送音频 / 同步全部会话 / 删除同步 / 斜杠命令服务端执行）
+- **语音输入改为直接送音频给 Hermes**：不再用系统 `RecognizerIntent` 转文字。点麦克风开始 `MediaRecorder` 录制 AAC/.m4a（`VoiceRecorder`，缓存目录），再点停止即上传到文件服务并作为附件发送（用户消息气泡显示「🎤 语音消息」）。
+  - 真正原因：该部署 `stt` 工具集是「纯配置、无 agent 工具」（`hermes_cli/tools_config.py:_CONFIG_ONLY_TOOLSETS`），`/v1/capabilities` 也是 `audio_api:false`，所以音频文件本身听不了；但 Hermes 自带转写入口 `tools.transcription_tools.transcribe_audio(path)`。
+  - 因此 run `instructions` 里对音频附件单独注入：告诉 Hermes 用 `cd /usr/local/lib/hermes-agent && ./venv/bin/python -c "...transcribe_audio('<path>')"` 先把语音转成文字再回答。旧的 `recognize` 相关代码/`<queries>` 已移除。
+  - 服务端前置：venv 缺 `faster-whisper`，按 Hermes 自带锁安装 `stt-whisper` extra（`sync_venv(['stt-whisper'])`，钉 `av==18.1.0`；切勿裸装导致 PyAV 19 崩溃）。
+- **一键同步全部会话**：主页顶栏新增「同步」按钮（同步中显示进度圈）。`GET /api/sessions`（分页 `limit/offset/has_more`）→ 合并进本地 `sessions`：新会话插入；已存在则只更新 `updatedAt`/`preview`，标题仅在本地仍是默认「新会话」时用服务端标题回填（保留本地重命名）。过滤 `hidden` / `is_internal_child` / 有 `parent_session_id` 的内部子会话。
+- **删除会话同步删除服务端**：`DELETE /api/sessions/{id}`（404 视为已删除）；无论服务端成功与否都删本地，服务端失败时 Snackbar 提示「已从本机删除，但服务端删除失败」。删除确认文案改为「本机与服务器上的记录都会被移除」。
+- **斜杠命令服务端执行**：`/` 命令（`/status`、`/context`、`/usage`、`/help`、`/model`、`/sessions`、`/history`、`/skills`、`/tools`、`/insights` 只读白名单）在服务端 `gateway/platforms/api_server_runs.py::_handle_runs` 内直接派发给网关命令处理器并就地完成 run；非白名单（如 `/new`）与普通对话照旧走模型。补丁备份为 `api_server_runs.py.bak-*`，可随时回滚。

@@ -7,9 +7,11 @@ import com.hermes.client.data.remote.dto.RunCreatedDto
 import com.hermes.client.data.remote.dto.RunRequest
 import com.hermes.client.data.remote.dto.RunStatusDto
 import com.hermes.client.data.remote.dto.SessionMessagesResponse
+import com.hermes.client.data.remote.dto.ServerSessionsResponse
 import com.hermes.client.data.remote.dto.SteerRequest
 import com.google.gson.JsonElement
 import retrofit2.http.Body
+import retrofit2.http.DELETE
 import retrofit2.http.GET
 import retrofit2.http.Header
 import retrofit2.http.POST
@@ -54,4 +56,15 @@ interface HermesApi {
         @Path("sessionId") sessionId: String,
         @Query("limit") limit: Int = 500,
     ): SessionMessagesResponse
+
+    /** List every session known to the server (including ones created outside this app). */
+    @GET("api/sessions")
+    suspend fun listSessions(
+        @Query("limit") limit: Int = 200,
+        @Query("offset") offset: Int = 0,
+    ): ServerSessionsResponse
+
+    /** Delete a session on the server so it disappears for every client. */
+    @DELETE("api/sessions/{sessionId}")
+    suspend fun deleteSession(@Path("sessionId") sessionId: String): JsonElement
 }

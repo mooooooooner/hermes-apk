@@ -1,8 +1,7 @@
 package com.hermes.client.ui.chat
 
-import android.app.Activity
-import android.content.Intent
-import android.speech.RecognizerIntent
+import android.Manifest
+import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -59,6 +58,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -71,6 +71,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
@@ -103,15 +104,28 @@ fun ChatRoute(
         ActivityResultContracts.OpenMultipleDocuments(),
     ) { uris -> viewModel.addAttachments(uris) }
 
-    val voiceLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult(),
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            val spoken = result.data
-                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-                ?.firstOrNull()
-            if (!spoken.isNullOrBlank()) viewModel.appendInput(spoken)
+    // Voice input records an audio file and sends it to Hermes (no on-device transcription).
+    var isRecording by remember { mutableStateOf(false) }
+    val recorder = remember { VoiceRecorder(context) }
+    val startRecording: () -> Unit = {
+        val file = recorder.start()
+        if (file != null) {
+            isRecording = true
+        } else {
+            viewModel.notify("无法开始录音")
         }
+    }
+    val audioPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            startRecording()
+        } else {
+            viewModel.notify("需要麦克风权限才能发语音")
+        }
+    }
+    DisposableEffect(Unit) {
+        onDispose { recorder.abort() }
     }
 
     ChatScreen(
@@ -120,6 +134,7 @@ fun ChatRoute(
         input = input,
         attachments = attachments,
         isRunning = isRunning,
+        isRecording = isRecording,
         assistantName = settings.assistantName,
         assistantAvatarPath = settings.assistantAvatarPath,
         commands = commands,
@@ -137,19 +152,16 @@ fun ChatRoute(
         onDelete = viewModel::deleteMessage,
         onOpenMedia = viewModel::openMedia,
         onVoice = {
-            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(
-                    RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                    RecognizerIntent.LANGUAGE_MODEL_FREE_FORM,
-                )
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, java.util.Locale.getDefault().toLanguageTag())
-                putExtra(RecognizerIntent.EXTRA_PROMPT, "请说话…")
-            }
-            if (intent.resolveActivity(context.packageManager) != null) {
-                runCatching { voiceLauncher.launch(intent) }
-                    .onFailure { viewModel.notify("无法启动语音输入") }
+            if (isRecording) {
+                isRecording = false
+                val file = recorder.stop()
+                if (file != null) viewModel.sendVoice(file) else viewModel.notify("录音失败")
             } else {
-                viewModel.notify("设备不支持语音输入")
+                val granted = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.RECORD_AUDIO,
+                ) == PackageManager.PERMISSION_GRANTED
+                if (granted) startRecording() else audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
             }
         },
     )
@@ -163,6 +175,7 @@ fun ChatScreen(
     input: String,
     attachments: List<Attachment>,
     isRunning: Boolean,
+    isRecording: Boolean,
     assistantName: String,
     assistantAvatarPath: String,
     commands: List<CommandDto>,
@@ -312,6 +325,7 @@ fun ChatScreen(
             ChatInputBar(
                 input = input,
                 isRunning = isRunning,
+                isRecording = isRecording,
                 assistantName = assistantName,
                 onInputChange = onInputChange,
                 onSend = onSend,
@@ -408,6 +422,7 @@ private fun AttachmentStrip(
 private fun ChatInputBar(
     input: String,
     isRunning: Boolean,
+    isRecording: Boolean,
     assistantName: String = "Hermes",
     onInputChange: (String) -> Unit,
     onSend: () -> Unit,
@@ -431,7 +446,13 @@ private fun ChatInputBar(
                 value = input,
                 onValueChange = onInputChange,
                 modifier = Modifier.weight(1f),
-                placeholder = { Text("给 ${assistantName.ifBlank { "Hermes" }} 发消息…") },
+                enabled = !isRecording,
+                placeholder = {
+                    Text(
+                        if (isRecording) "录音中…点击右侧停止并发送"
+                        else "给 ${assistantName.ifBlank { "Hermes" }} 发消息…",
+                    )
+                },
                 maxLines = 6,
                 shape = MaterialTheme.shapes.large,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
@@ -451,34 +472,46 @@ private fun ChatInputBar(
                 },
             )
             Spacer(Modifier.width(8.dp))
-            if (isRunning) {
-                FilledIconButton(
-                    onClick = onStop,
-                    colors = IconButtonDefaults.filledIconButtonColors(
-                        containerColor = MaterialTheme.colorScheme.errorContainer,
-                        contentColor = MaterialTheme.colorScheme.onErrorContainer,
-                    ),
-                ) {
-                    Icon(Icons.Rounded.Stop, contentDescription = "中断")
-                }
-                Spacer(Modifier.width(8.dp))
-            }
-            if (input.isBlank() && !isRunning) {
+            if (isRecording) {
                 FilledIconButton(
                     onClick = onVoice,
                     colors = IconButtonDefaults.filledIconButtonColors(
-                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError,
                     ),
                 ) {
-                    Icon(Icons.Rounded.Mic, contentDescription = "语音输入")
+                    Icon(Icons.Rounded.Stop, contentDescription = "停止录音")
                 }
             } else {
-                FilledIconButton(
-                    onClick = onSend,
-                    enabled = input.isNotBlank(),
-                ) {
-                    Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = "发送")
+                if (isRunning) {
+                    FilledIconButton(
+                        onClick = onStop,
+                        colors = IconButtonDefaults.filledIconButtonColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer,
+                            contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                        ),
+                    ) {
+                        Icon(Icons.Rounded.Stop, contentDescription = "中断")
+                    }
+                    Spacer(Modifier.width(8.dp))
+                }
+                if (input.isBlank() && !isRunning) {
+                    FilledIconButton(
+                        onClick = onVoice,
+                        colors = IconButtonDefaults.filledIconButtonColors(
+                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                        ),
+                    ) {
+                        Icon(Icons.Rounded.Mic, contentDescription = "语音输入")
+                    }
+                } else {
+                    FilledIconButton(
+                        onClick = onSend,
+                        enabled = input.isNotBlank(),
+                    ) {
+                        Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = "发送")
+                    }
                 }
             }
         }

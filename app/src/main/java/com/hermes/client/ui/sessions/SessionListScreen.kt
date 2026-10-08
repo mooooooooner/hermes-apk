@@ -25,9 +25,11 @@ import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -37,11 +39,14 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -65,13 +70,22 @@ fun SessionListRoute(
 ) {
     val sessions by viewModel.sessions.collectAsStateWithLifecycle()
     val configured by viewModel.configured.collectAsStateWithLifecycle()
+    val syncing by viewModel.syncing.collectAsStateWithLifecycle()
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    LaunchedEffect(Unit) {
+        viewModel.events.collect { snackbarHostState.showSnackbar(it) }
+    }
 
     SessionListScreen(
         sessions = sessions,
         configured = configured,
+        syncing = syncing,
+        snackbarHostState = snackbarHostState,
         onOpenSession = onOpenSession,
         onOpenSettings = onOpenSettings,
         onNewSession = { viewModel.createSession(onOpenSession) },
+        onSync = viewModel::syncAll,
         onRename = viewModel::rename,
         onDelete = viewModel::delete,
     )
@@ -82,9 +96,12 @@ fun SessionListRoute(
 fun SessionListScreen(
     sessions: List<ChatSession>,
     configured: Boolean,
+    syncing: Boolean,
+    snackbarHostState: SnackbarHostState,
     onOpenSession: (String) -> Unit,
     onOpenSettings: () -> Unit,
     onNewSession: () -> Unit,
+    onSync: () -> Unit,
     onRename: (String, String) -> Unit,
     onDelete: (String) -> Unit,
 ) {
@@ -103,6 +120,16 @@ fun SessionListScreen(
                     )
                 },
                 actions = {
+                    IconButton(onClick = onSync, enabled = !syncing) {
+                        if (syncing) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(22.dp),
+                                strokeWidth = 2.dp,
+                            )
+                        } else {
+                            Icon(Icons.Rounded.Sync, contentDescription = "同步全部会话")
+                        }
+                    }
                     IconButton(onClick = onOpenSettings) {
                         Icon(Icons.Rounded.Settings, contentDescription = "设置")
                     }
@@ -112,6 +139,7 @@ fun SessionListScreen(
                 ),
             )
         },
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         floatingActionButton = {
             ExtendedFloatingActionButton(
                 onClick = onNewSession,
@@ -163,7 +191,7 @@ fun SessionListScreen(
         AlertDialog(
             onDismissRequest = { deleteTarget = null },
             title = { Text("删除会话") },
-            text = { Text("确定删除「${target.title}」？本地记录将被移除，服务端历史仍保留。") },
+            text = { Text("确定删除「${target.title}」？本机与服务器上的记录都会被移除。") },
             confirmButton = {
                 TextButton(onClick = { onDelete(target.id); deleteTarget = null }) {
                     Text("删除", color = MaterialTheme.colorScheme.error)

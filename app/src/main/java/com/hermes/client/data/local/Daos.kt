@@ -27,6 +27,9 @@ interface SessionDao {
     @Query("UPDATE sessions SET updatedAt = :updatedAt, preview = :preview WHERE id = :id")
     suspend fun touch(id: String, updatedAt: Long, preview: String)
 
+    @Query("UPDATE sessions SET title = :title, updatedAt = :updatedAt, preview = :preview WHERE id = :id")
+    suspend fun updateMeta(id: String, title: String, updatedAt: Long, preview: String)
+
     @Query("UPDATE sessions SET activeRunId = :runId, activeRunState = :state WHERE id = :id")
     suspend fun setActiveRun(id: String, runId: String?, state: String?)
 

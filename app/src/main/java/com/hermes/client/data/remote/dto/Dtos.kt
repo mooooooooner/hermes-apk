@@ -155,6 +155,28 @@ data class SteerRequest(
     @SerializedName("input") val input: String,
 )
 
+/** GET /api/sessions */
+data class ServerSessionsResponse(
+    @SerializedName("object") val objectType: String? = null,
+    @SerializedName("data") val data: List<ServerSession> = emptyList(),
+    @SerializedName("limit") val limit: Int? = null,
+    @SerializedName("offset") val offset: Int? = null,
+    @SerializedName("has_more") val hasMore: Boolean = false,
+)
+
+data class ServerSession(
+    @SerializedName("id") val id: String = "",
+    @SerializedName("source") val source: String? = null,
+    @SerializedName("title") val title: String? = null,
+    @SerializedName("started_at") val startedAt: Double? = null,
+    @SerializedName("last_active") val lastActive: Double? = null,
+    @SerializedName("message_count") val messageCount: Int? = null,
+    @SerializedName("preview") val preview: String? = null,
+    @SerializedName("parent_session_id") val parentSessionId: String? = null,
+    @SerializedName("hidden") val hidden: Boolean = false,
+    @SerializedName("is_internal_child") val isInternalChild: Boolean = false,
+)
+
 /** GET /api/sessions/{id}/messages */
 data class SessionMessagesResponse(
     @SerializedName("object") val objectType: String? = null,

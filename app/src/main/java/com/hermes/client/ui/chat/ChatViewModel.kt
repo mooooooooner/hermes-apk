@@ -101,14 +101,6 @@ class ChatViewModel @Inject constructor(
         _input.value = value
     }
 
-    /** Append dictated text to the current draft (used by voice input). */
-    fun appendInput(text: String) {
-        val spoken = text.trim()
-        if (spoken.isEmpty()) return
-        val current = _input.value
-        _input.value = if (current.isBlank()) spoken else current.trimEnd() + " " + spoken
-    }
-
     fun notify(message: String) {
         _events.tryEmit(message)
     }
@@ -147,6 +139,19 @@ class ChatViewModel @Inject constructor(
         _input.value = ""
         _attachments.value = emptyList()
         launchSubmit { chatRepository.sendMessage(sessionId, text, current) }
+    }
+
+    /** Send a recorded voice note as a real audio attachment (Hermes transcribes it server-side). */
+    fun sendVoice(file: java.io.File) {
+        val attachment = Attachment(
+            id = UUID.randomUUID().toString(),
+            name = file.name,
+            mimeType = "audio/mp4",
+            size = file.length(),
+            uri = Uri.fromFile(file).toString(),
+            kind = AttachmentKind.FILE,
+        )
+        launchSubmit { chatRepository.sendMessage(sessionId, "🎤 语音消息", listOf(attachment)) }
     }
 
     fun stop() {
