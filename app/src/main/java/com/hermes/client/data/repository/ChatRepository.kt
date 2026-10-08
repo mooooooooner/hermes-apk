@@ -23,6 +23,7 @@ import com.hermes.client.data.remote.dto.UploadedFileDto
 import com.hermes.client.data.prefs.SettingsRepository
 import com.hermes.client.worker.WorkScheduler
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
@@ -112,7 +113,8 @@ class ChatRepository @Inject constructor(
         text: String,
         attachments: List<Attachment>,
     ): Result<String> = withContext(Dispatchers.IO) {
-        runCatching {
+        var assistantId: Long? = null
+        try {
             if (sessionDao.get(sessionId) == null) {
                 val createdAt = System.currentTimeMillis()
                 sessionDao.upsert(
@@ -127,7 +129,7 @@ class ChatRepository @Inject constructor(
 
             val now = System.currentTimeMillis()
             val seq = (messageDao.maxSeq(sessionId) ?: 0) + 1
-            val assistantId = messageDao.insert(
+            val placeholderId = messageDao.insert(
                 MessageEntity(
                     sessionId = sessionId,
                     role = MessageRole.ASSISTANT.name,
@@ -138,6 +140,9 @@ class ChatRepository @Inject constructor(
                     updatedAt = now,
                 ),
             )
+            assistantId = placeholderId
+            // Guard the placeholder from the orphan sweep while this network call is in flight.
+            runManager.markSubmitInFlight(placeholderId)
 
             val settingsSnapshot = settings.snapshot()
             // Ship attachments to the file service so the agent can read them by local path. Only
@@ -156,35 +161,64 @@ class ChatRepository @Inject constructor(
                     runId = created.runId,
                     sessionId = sessionId,
                     userMessageId = null,
-                    assistantMessageId = assistantId,
+                    assistantMessageId = placeholderId,
                     status = RunState.STARTED.name,
                     createdAt = now,
                     updatedAt = now,
                 ),
             )
-            messageDao.bindRun(assistantId, created.runId, MessageStatus.STREAMING.name)
+            messageDao.bindRun(placeholderId, created.runId, MessageStatus.STREAMING.name)
             sessionDao.setActiveRun(sessionId, created.runId, RunState.RUNNING.name)
             sessionDao.touch(sessionId, now, text.take(120))
 
             runManager.attach(created.runId, sessionId)
             workScheduler.scheduleOneTimeReconcile()
-            created.runId
-        }.onFailure { error ->
+            Result.success(created.runId)
+        } catch (cancellation: CancellationException) {
+            // stop() cancelled us before the run existed; leave the placeholder to cancelPending().
+            throw cancellation
+        } catch (error: Exception) {
             // Mark the orphan placeholder so the UI doesn't spin forever.
             runCatching {
-                val last = messageDao.list(sessionId).lastOrNull { it.runId == null && it.role == MessageRole.ASSISTANT.name }
-                if (last != null) {
-                    messageDao.update(
-                        last.copy(
-                            status = MessageStatus.ERROR.name,
-                            error = error.message ?: "发起任务失败",
-                            updatedAt = System.currentTimeMillis(),
-                        ),
-                    )
+                assistantId?.let { id ->
+                    messageDao.get(id)?.takeIf { it.runId == null }?.let { message ->
+                        messageDao.update(
+                            message.copy(
+                                status = MessageStatus.ERROR.name,
+                                error = error.message ?: "发起任务失败",
+                                updatedAt = System.currentTimeMillis(),
+                            ),
+                        )
+                    }
                 }
                 sessionDao.setActiveRun(sessionId, null, null)
             }
+            Result.failure(error)
+        } finally {
+            assistantId?.let { runManager.clearSubmitInFlight(it) }
         }
+    }
+
+    /**
+     * Cancel a placeholder that never became a run: either a send that is still in flight when the
+     * user hits interrupt, or one abandoned by a crash. Returns how many were cleared.
+     */
+    suspend fun cancelPending(sessionId: String): Int = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        val pending = messageDao.list(sessionId).filter {
+            it.status == MessageStatus.PENDING.name && it.runId == null
+        }
+        pending.forEach { message ->
+            messageDao.update(
+                message.copy(
+                    status = MessageStatus.CANCELLED.name,
+                    error = "已取消",
+                    updatedAt = now,
+                ),
+            )
+        }
+        sessionDao.setActiveRun(sessionId, null, null)
+        pending.size
     }
 
     private suspend fun uploadAttachments(

@@ -48,6 +48,10 @@ interface MessageDao {
     @Query("SELECT MAX(seq) FROM messages WHERE sessionId = :sessionId")
     suspend fun maxSeq(sessionId: String): Int?
 
+    /** Placeholders persisted as PENDING but never bound to a run (killed mid-send). */
+    @Query("SELECT * FROM messages WHERE status = 'PENDING' AND runId IS NULL")
+    suspend fun pendingWithoutRun(): List<MessageEntity>
+
     @Insert
     suspend fun insert(message: MessageEntity): Long
 

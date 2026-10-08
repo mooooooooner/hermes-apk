@@ -78,3 +78,10 @@
 - **配色**：换成 RikkaHub 的 Claude / Anthropic 预设（象牙白/米色暖底 + 赤陶橙强调），补齐 `surfaceContainer*` / `inverse*` / `errorContainer` 等 Material3 token，浅色与深色均适配。
 - **命令集**：文件服务 `commands.json` 改由 Hermes 的真实命令注册表 `hermes_cli/commands.py` 生成（现 102 条，含 `/new`、`/clear`、`/history`、`/save`、`/compress` 等），仍未改动 App 读取逻辑。
 - **应用图标**：改用 Hermes 官方 `assets/icon-master.svg` / `nous-girl-black.svg`；Pillow 生成自适应图标前景 + 单色层 + 各密度位图，背景 `#FAF9F5`。
+
+### 本批次（发送失败 / 杀进程后卡死修复）
+- **现象**：发送时网络不通（或应用在首次网络请求返回前被杀），会在本地留下 `status=PENDING`、`runId=null` 的助手占位消息；下次打开后 `isRunning` 永远为真、`activeRunId` 为 null，于是「中断」按钮无从下手，聊天持续卡死。
+- **对账清理**：`RunManager.sweepOrphanPlaceholders()` 在 `reconcileAll()` 开头把「PENDING 且无 runId」的占位消息标记为 `ERROR`（`消息未发出…请重新发送`）并清空会话 activeRun；正在进行中的提交用内存集合 `inFlightSubmits` 保护，进程重启后该集合为空，正好回收被杀时的残留。
+- **中断兜底**：`ChatViewModel` 保留发送协程 `submitJob`；`stop()` 在没有 runId 时取消该协程并调用 `ChatRepository.cancelPending()`，把无 run 的占位置为 `CANCELLED`（UI 显示「已中断」）。
+- **提交重构**：`submit()` 用 `try/catch/finally`：`CancellationException` 原样抛出、其它异常把占位置 `ERROR`、`finally` 清除 in-flight 标记；错误定位改用占位 id，不再靠「最后一条 runId 为空的助手消息」猜测。
+- 已实测：注入 `PENDING`+`runId=null` 行 → 重开自动变 `ERROR`；黑洞网络下发送卡住 → 点「中断」立即变 `CANCELLED`，按钮恢复为麦克风。

@@ -22,6 +22,7 @@ import com.hermes.client.data.repository.SessionRepository
 import com.hermes.client.ui.util.resolveFile
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -46,6 +47,12 @@ class ChatViewModel @Inject constructor(
 ) : ViewModel() {
 
     val sessionId: String = checkNotNull(savedStateHandle["sessionId"])
+
+    /**
+     * The in-flight send/resend coroutine. Kept so [stop] can cancel a submit that has not yet
+     * produced a run id (otherwise an interrupt during the first network call would be a no-op).
+     */
+    private var submitJob: Job? = null
 
     val session: StateFlow<ChatSession?> = sessionRepository.observeSession(sessionId)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
@@ -139,15 +146,23 @@ class ChatViewModel @Inject constructor(
         if (text.isEmpty() && current.isEmpty()) return
         _input.value = ""
         _attachments.value = emptyList()
-        viewModelScope.launch {
-            val result = chatRepository.sendMessage(sessionId, text, current)
-            result.exceptionOrNull()?.let { emitError(it.message ?: "发送失败") }
-        }
+        launchSubmit { chatRepository.sendMessage(sessionId, text, current) }
     }
 
     fun stop() {
-        val runId = activeRunId.value ?: return
-        viewModelScope.launch { runManager.stop(runId) }
+        val runId = activeRunId.value
+        if (runId != null) {
+            viewModelScope.launch { runManager.stop(runId) }
+            return
+        }
+        // No run yet: either the first network call is still hanging or the placeholder was
+        // orphaned by a crash. Cancel locally and clear it so the chat stops spinning.
+        submitJob?.cancel()
+        submitJob = null
+        viewModelScope.launch {
+            val cleared = chatRepository.cancelPending(sessionId)
+            if (cleared > 0) emitError("已取消未发出的消息")
+        }
     }
 
     fun rename(title: String) {
@@ -206,16 +221,18 @@ class ChatViewModel @Inject constructor(
     }
 
     fun resend(messageId: Long) {
-        viewModelScope.launch {
-            chatRepository.resend(messageId)
-                .exceptionOrNull()?.let { emitError(it.message ?: "重发失败") }
-        }
+        launchSubmit { chatRepository.resend(messageId) }
     }
 
     fun editAndResend(messageId: Long, text: String) {
-        viewModelScope.launch {
-            chatRepository.editAndResend(messageId, text)
-                .exceptionOrNull()?.let { emitError(it.message ?: "重发失败") }
+        launchSubmit { chatRepository.editAndResend(messageId, text) }
+    }
+
+    /** Run a submit suspending call and surface failures; cancellations are swallowed silently. */
+    private fun launchSubmit(block: suspend () -> Result<String>) {
+        submitJob?.cancel()
+        submitJob = viewModelScope.launch {
+            block().exceptionOrNull()?.let { emitError(it.message ?: "发送失败") }
         }
     }
 

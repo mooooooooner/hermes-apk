@@ -59,7 +59,47 @@ class RunManager @Inject constructor(
     private val jobs = ConcurrentHashMap<String, Job>()
     private val reconcileMutex = Mutex()
 
+    /**
+     * Placeholder message ids for which a `POST /v1/runs` is currently in flight. A placeholder
+     * exists as `PENDING` with `runId == null` for the whole submit window, so the orphan sweep
+     * must not touch these. Across a process restart the set is empty, which is exactly what lets
+     * the sweep reclaim a message that was abandoned when the app was killed mid-send.
+     */
+    private val inFlightSubmits: MutableSet<Long> = ConcurrentHashMap.newKeySet()
+
     fun isAttached(runId: String): Boolean = jobs.containsKey(runId)
+
+    fun markSubmitInFlight(messageId: Long) {
+        inFlightSubmits.add(messageId)
+    }
+
+    fun clearSubmitInFlight(messageId: Long) {
+        inFlightSubmits.remove(messageId)
+    }
+
+    /**
+     * Fail placeholder messages left `PENDING` without a run. This is what unsticks a chat after
+     * the app was closed while the first network call of a send never completed: otherwise the
+     * message would spin forever and the interrupt button (bound to a run id) would do nothing.
+     */
+    suspend fun sweepOrphanPlaceholders() {
+        val orphans = runCatching { messageDao.pendingWithoutRun() }.getOrNull() ?: return
+        if (orphans.isEmpty()) return
+        val now = System.currentTimeMillis()
+        orphans.forEach { message ->
+            if (message.id in inFlightSubmits) return@forEach
+            runCatching {
+                messageDao.update(
+                    message.copy(
+                        status = MessageStatus.ERROR.name,
+                        error = "消息未发出（应用在发送过程中被关闭），请重新发送",
+                        updatedAt = now,
+                    ),
+                )
+                sessionDao.setActiveRun(message.sessionId, null, null)
+            }
+        }
+    }
 
     /** Start (or resume) streaming events for a run. Safe to call multiple times. */
     fun attach(runId: String, sessionId: String) {
@@ -367,6 +407,9 @@ class RunManager @Inject constructor(
      * and from the periodic WorkManager job.
      */
     suspend fun reconcileAll() {
+        // Reclaim abandoned send placeholders first: they have no run to reconcile and would
+        // otherwise leave the chat stuck on "running".
+        sweepOrphanPlaceholders()
         if (!reconcileMutex.tryLock()) return
         try {
             val active = runDao.activeRuns()
