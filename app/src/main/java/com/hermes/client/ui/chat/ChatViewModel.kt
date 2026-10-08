@@ -7,6 +7,7 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.hermes.client.ChatVisibility
 import com.hermes.client.data.model.Attachment
 import com.hermes.client.data.model.AttachmentKind
 import com.hermes.client.data.model.ChatMessage
@@ -44,6 +45,7 @@ class ChatViewModel @Inject constructor(
     private val runManager: RunManager,
     private val fileService: FileServiceRepository,
     settingsRepository: SettingsRepository,
+    val chatVisibility: ChatVisibility,
 ) : ViewModel() {
 
     val sessionId: String = checkNotNull(savedStateHandle["sessionId"])
@@ -57,6 +59,7 @@ class ChatViewModel @Inject constructor(
     val session: StateFlow<ChatSession?> = sessionRepository.observeSession(sessionId)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
+    /** Newest first (DAO orders DESC); the chat renders bottom-up. */
     val messages: StateFlow<List<ChatMessage>> = chatRepository.observeMessages(sessionId)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
@@ -86,7 +89,7 @@ class ChatViewModel @Inject constructor(
     // interrupt button would silently do nothing.
     val activeRunId: StateFlow<String?> = messages
         .map { list ->
-            list.lastOrNull {
+            list.firstOrNull {
                 it.status == MessageStatus.STREAMING && it.runId != null
             }?.runId
         }
@@ -133,6 +136,11 @@ class ChatViewModel @Inject constructor(
     }
 
     fun send() {
+        // One run at a time per session: the server steps on the same agent loop otherwise.
+        if (isRunning.value) {
+            emitError("已有任务进行中，请先停止再发送")
+            return
+        }
         val text = _input.value.trim()
         val current = _attachments.value
         if (text.isEmpty() && current.isEmpty()) return
@@ -143,6 +151,10 @@ class ChatViewModel @Inject constructor(
 
     /** Send a recorded voice note as a real audio attachment (Hermes transcribes it server-side). */
     fun sendVoice(file: java.io.File) {
+        if (isRunning.value) {
+            emitError("已有任务进行中，请先停止再发送")
+            return
+        }
         val attachment = Attachment(
             id = UUID.randomUUID().toString(),
             name = file.name,
@@ -151,22 +163,39 @@ class ChatViewModel @Inject constructor(
             uri = Uri.fromFile(file).toString(),
             kind = AttachmentKind.FILE,
         )
-        launchSubmit { chatRepository.sendMessage(sessionId, "🎤 语音消息", listOf(attachment)) }
+        launchSubmit {
+            chatRepository.sendMessage(sessionId, "🎤 语音消息", listOf(attachment))
+                .also { if (it.isSuccess) file.delete() }
+        }
     }
 
     fun stop() {
         val runId = activeRunId.value
         if (runId != null) {
-            viewModelScope.launch { runManager.stop(runId) }
+            viewModelScope.launch {
+                runManager.stop(runId).onFailure {
+                    emitError("中断请求未送达：${it.message ?: "网络错误"}（任务仍在服务端运行）")
+                }
+            }
             return
         }
-        // No run yet: either the first network call is still hanging or the placeholder was
-        // orphaned by a crash. Cancel locally and clear it so the chat stops spinning.
-        submitJob?.cancel()
-        submitJob = null
         viewModelScope.launch {
+            // Mark the pending placeholder CANCELLED *before* cancelling the submit job, so the
+            // job's cancellation handler sees the user's intent and stops the server-side run.
             val cleared = chatRepository.cancelPending(sessionId)
-            if (cleared > 0) emitError("已取消未发出的消息")
+            submitJob?.cancel()
+            submitJob = null
+            // The submit may have completed between reading activeRunId and now (flow lag):
+            // re-query the DB and stop whatever run actually got created.
+            val lateRunId = chatRepository.activeRunId(sessionId)
+            when {
+                lateRunId != null ->
+                    runManager.stop(lateRunId).onFailure {
+                        emitError("中断请求未送达：${it.message ?: "网络错误"}（任务仍在服务端运行）")
+                    }
+
+                cleared > 0 -> emitError("已取消未发出的消息")
+            }
         }
     }
 

@@ -17,7 +17,13 @@ class VoiceRecorder(private val context: Context) {
 
     fun start(): File? {
         abort()
-        val dir = File(context.cacheDir, "voice").apply { mkdirs() }
+        val dir = File(context.cacheDir, "voice").apply {
+            mkdirs()
+            // Voice notes are deleted right after a successful send; sweep stragglers (failed
+            // sends, crashes) older than a week so the cache stays bounded.
+            val cutoff = System.currentTimeMillis() - CACHE_TTL_MS
+            listFiles()?.forEach { f -> if (f.isFile && f.lastModified() < cutoff) f.delete() }
+        }
         val file = File(dir, "voice_${System.currentTimeMillis()}.m4a")
         val rec = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             MediaRecorder(context)
@@ -74,5 +80,9 @@ class VoiceRecorder(private val context: Context) {
         runCatching { rec.release() }
         outputFile?.delete()
         outputFile = null
+    }
+
+    private companion object {
+        const val CACHE_TTL_MS = 7L * 24 * 60 * 60 * 1000
     }
 }

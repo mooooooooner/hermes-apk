@@ -87,7 +87,8 @@ data class InputUserMessage(
 )
 
 data class RunCreatedDto(
-    @SerializedName("run_id") val runId: String,
+    /** Nullable in the DTO: a malformed/edge-case server response must not crash the client. */
+    @SerializedName("run_id") val runId: String? = null,
     @SerializedName("status") val status: String? = null,
     @SerializedName("replayed") val replayed: Boolean = false,
 )

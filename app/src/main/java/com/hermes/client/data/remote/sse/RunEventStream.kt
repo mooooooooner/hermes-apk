@@ -4,8 +4,10 @@ import com.google.gson.Gson
 import com.hermes.client.data.remote.dto.RunEventDto
 import com.hermes.client.data.prefs.SettingsRepository
 import com.hermes.client.di.SseClient
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -28,6 +30,11 @@ class RunEventStream @Inject constructor(
     private val settings: SettingsRepository,
 ) {
 
+    /**
+     * The flow is buffered without limit: the consumer throttles its Room writes (~8x/second),
+     * so a burst of deltas larger than callbackFlow's default 64-slot buffer would otherwise
+     * make `trySend` fail and silently drop events (garbling the streamed text).
+     */
     fun events(runId: String): Flow<RunEventDto> = callbackFlow {
         if (settings.cachedBaseUrl.isBlank()) {
             close(IOException("尚未配置服务器地址"))
@@ -61,5 +68,5 @@ class RunEventStream @Inject constructor(
 
         val eventSource = EventSources.createFactory(client).newEventSource(request, listener)
         awaitClose { eventSource.cancel() }
-    }
+    }.buffer(capacity = Channel.UNLIMITED)
 }

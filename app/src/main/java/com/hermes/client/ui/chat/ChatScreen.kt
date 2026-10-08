@@ -100,6 +100,17 @@ fun ChatRoute(
         viewModel.events.collect { snackbarHostState.showSnackbar(it) }
     }
 
+    // Tell RunManager which session is on screen so a run finishing in front of the user does not
+    // also fire a system notification (the live UI already shows the outcome).
+    DisposableEffect(viewModel.sessionId) {
+        viewModel.chatVisibility.foregroundSessionId = viewModel.sessionId
+        onDispose {
+            if (viewModel.chatVisibility.foregroundSessionId == viewModel.sessionId) {
+                viewModel.chatVisibility.foregroundSessionId = null
+            }
+        }
+    }
+
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments(),
     ) { uris -> viewModel.addAttachments(uris) }
@@ -285,7 +296,9 @@ fun ChatScreen(
                         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
                         verticalArrangement = Arrangement.spacedBy(18.dp),
                     ) {
-                        itemsIndexed(messages.asReversed(), key = { _, item -> item.id }) { _, message ->
+                        // messages is newest-first (DAO orders DESC): item 0 is the newest turn and
+                        // sits at the bottom in reverseLayout — no per-frame asReversed() copy.
+                        itemsIndexed(messages, key = { _, item -> item.id }) { _, message ->
                             when (message.role) {
                                 MessageRole.USER -> UserMessage(
                                     message = message,
@@ -481,36 +494,34 @@ private fun ChatInputBar(
                 ) {
                     Icon(Icons.Rounded.Stop, contentDescription = "停止录音")
                 }
-            } else {
-                if (isRunning) {
-                    FilledIconButton(
-                        onClick = onStop,
-                        colors = IconButtonDefaults.filledIconButtonColors(
-                            containerColor = MaterialTheme.colorScheme.errorContainer,
-                            contentColor = MaterialTheme.colorScheme.onErrorContainer,
-                        ),
-                    ) {
-                        Icon(Icons.Rounded.Stop, contentDescription = "中断")
-                    }
-                    Spacer(Modifier.width(8.dp))
+            } else if (isRunning) {
+                // While a task runs the only action is interrupt — sending into the same session
+                // would race the agent loop server-side.
+                FilledIconButton(
+                    onClick = onStop,
+                    colors = IconButtonDefaults.filledIconButtonColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer,
+                        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                    ),
+                ) {
+                    Icon(Icons.Rounded.Stop, contentDescription = "中断")
                 }
-                if (input.isBlank() && !isRunning) {
-                    FilledIconButton(
-                        onClick = onVoice,
-                        colors = IconButtonDefaults.filledIconButtonColors(
-                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                        ),
-                    ) {
-                        Icon(Icons.Rounded.Mic, contentDescription = "语音输入")
-                    }
-                } else {
-                    FilledIconButton(
-                        onClick = onSend,
-                        enabled = input.isNotBlank(),
-                    ) {
-                        Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = "发送")
-                    }
+            } else if (input.isBlank()) {
+                FilledIconButton(
+                    onClick = onVoice,
+                    colors = IconButtonDefaults.filledIconButtonColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                    ),
+                ) {
+                    Icon(Icons.Rounded.Mic, contentDescription = "语音输入")
+                }
+            } else {
+                FilledIconButton(
+                    onClick = onSend,
+                    enabled = input.isNotBlank(),
+                ) {
+                    Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = "发送")
                 }
             }
         }

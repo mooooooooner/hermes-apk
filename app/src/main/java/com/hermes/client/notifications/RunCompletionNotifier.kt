@@ -14,6 +14,7 @@ import androidx.core.content.ContextCompat
 import com.hermes.client.MainActivity
 import com.hermes.client.R
 import dagger.hilt.android.qualifiers.ApplicationContext
+import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -21,6 +22,12 @@ import javax.inject.Singleton
 class RunCompletionNotifier @Inject constructor(
     @ApplicationContext private val context: Context,
 ) {
+    /**
+     * Monotonic notification ids. `runId.hashCode()` could collide and silently overwrite an
+     * unrelated notification; a fresh id per notification can never do that (tapping still
+     * clears it via setAutoCancel).
+     */
+    private val nextNotifyId = AtomicInteger(1)
     fun ensureChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
@@ -40,7 +47,6 @@ class RunCompletionNotifier @Inject constructor(
         title: String,
         message: String,
         success: Boolean,
-        notifyId: Int,
     ) {
         ensureChannel()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
@@ -50,6 +56,7 @@ class RunCompletionNotifier @Inject constructor(
             return
         }
 
+        val notifyId = nextNotifyId.getAndIncrement()
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra(MainActivity.EXTRA_SESSION_ID, sessionId)

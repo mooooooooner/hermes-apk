@@ -3,7 +3,10 @@ package com.hermes.client.data.repository
 import androidx.room.withTransaction
 import com.google.gson.Gson
 import com.google.gson.JsonElement
+import com.hermes.client.AppVisibility
+import com.hermes.client.ChatVisibility
 import com.hermes.client.data.local.HermesDatabase
+import com.hermes.client.data.local.MessageEntity
 import com.hermes.client.data.local.RunEntity
 import com.hermes.client.data.model.MessageSegment
 import com.hermes.client.data.model.MessageRole
@@ -24,7 +27,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -51,6 +53,8 @@ class RunManager @Inject constructor(
     private val gson: Gson,
     private val notifier: RunCompletionNotifier,
     private val workScheduler: WorkScheduler,
+    private val appVisibility: AppVisibility,
+    private val chatVisibility: ChatVisibility,
     @ApplicationScope private val scope: CoroutineScope,
 ) {
     private val sessionDao get() = db.sessionDao()
@@ -102,55 +106,67 @@ class RunManager @Inject constructor(
         }
     }
 
-    /** Start (or resume) streaming events for a run. Safe to call multiple times. */
+    /**
+     * Start (or resume) streaming events for a run. Safe to call multiple times.
+     *
+     * The job registers itself in [jobs] atomically (putIfAbsent) and unregisters via
+     * [Job.invokeOnCompletion], so neither a fast-completing stream nor two concurrent attaches
+     * can leave a stale entry that would block future re-attachment.
+     */
     fun attach(runId: String, sessionId: String) {
         if (jobs.containsKey(runId)) return
-        val job = scope.launch {
+        val job = scope.launch { streamWithRetry(runId, sessionId) }
+        if (jobs.putIfAbsent(runId, job) != null) {
+            // Another attach won the race; drop our duplicate.
+            job.cancel()
+            return
+        }
+        job.invokeOnCompletion { jobs.remove(runId, job) }
+    }
+
+    /**
+     * Stream a run's events, reconnecting with backoff when the connection drops or the server
+     * closes the stream before a terminal event arrived. Reconnecting rebuilds the state from
+     * scratch because the server replays the full event log on every (re)attach.
+     *
+     * Bounded: after [MAX_STREAM_ATTEMPTS] consecutive attempts without a terminal event we mark
+     * the run RUNNING and hand recovery to the reconciliation worker (status poll first, SSE
+     * only while it is genuinely still going) instead of spinning forever.
+     */
+    private suspend fun streamWithRetry(runId: String, sessionId: String) {
+        var attempt = 0
+        while (true) {
+            val run = runDao.get(runId) ?: return
+            // Already finalised elsewhere (stop() or a worker reconcile) — nothing to stream.
+            if (RunState.from(run.status).isTerminal) return
+            val assistantMessageId = run.assistantMessageId ?: return
+            val state = StreamState(
+                runId = runId,
+                sessionId = sessionId,
+                assistantMessageId = assistantMessageId,
+            )
             try {
-                collect(runId, sessionId)
+                eventStream.events(runId)
+                    .collect { event -> handleEvent(event, state) }
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
-                // Network dropped while streaming. The run lives on the server; mark it active and
-                // let reconciliation recover it (foreground re-entry or the periodic worker).
-                runCatching {
-                    runDao.get(runId)?.let {
-                        runDao.updateStatus(
-                            runId, RunState.RUNNING.name, it.output, it.error,
-                            it.lastEvent, gson.toJson(it.usage), System.currentTimeMillis(),
-                        )
-                    }
-                }
-            } finally {
-                jobs.remove(runId)
+                // Network dropped mid-stream: the run lives on server-side, retry below.
             }
-        }
-        jobs[runId] = job
-    }
-
-    private suspend fun collect(runId: String, sessionId: String) {
-        val run = runDao.get(runId) ?: return
-        val assistantMessageId = run.assistantMessageId ?: return
-        val state = StreamState(
-            runId = runId,
-            sessionId = sessionId,
-            assistantMessageId = assistantMessageId,
-        )
-        // The server replays a run's full event log when a client (re)attaches, so we rebuild the
-        // segments from scratch. This also makes re-attaching after process death dupe-free.
-        eventStream.events(runId)
-            .collect { event ->
-                handleEvent(event, state)
+            if (state.finished) return
+            attempt += 1
+            if (attempt >= MAX_STREAM_ATTEMPTS) {
+                // Give up on inline retries; the run stays RUNNING so reconcileAll() (worker or
+                // foreground re-entry) polls its status and recovers the final output.
+                flush(state, MessageStatus.STREAMING, null)
+                runDao.updateStatus(
+                    runId, RunState.RUNNING.name, null, null, "stream.closed",
+                    state.usage?.let { gson.toJson(it) }, System.currentTimeMillis(),
+                )
+                workScheduler.scheduleOneTimeReconcile()
+                return
             }
-
-        // Stream ended without an explicit terminal event: the run is still going server-side.
-        if (!state.finished) {
-            flush(state, MessageStatus.STREAMING, null)
-            runDao.updateStatus(
-                runId, RunState.RUNNING.name, null, null, "stream.closed",
-                state.usage?.let { gson.toJson(it) }, System.currentTimeMillis(),
-            )
-            workScheduler.scheduleOneTimeReconcile()
+            delay(minOf(STREAM_RETRY_BASE_MS shl (attempt - 1), STREAM_RETRY_MAX_MS))
         }
     }
 
@@ -172,10 +188,13 @@ class RunManager @Inject constructor(
                 val text = event.text.orEmpty()
                 if (text.isNotBlank() && !event.alreadyStreamed) {
                     val cur = state.current()
+                    val trimmed = text.trim()
                     val existing = cur.text.toString().trim()
                     // This deployment re-sends the already-delta'd text with already_streamed=false,
-                    // so only append genuinely new commentary to avoid duplicating the body.
-                    if (existing != text.trim() && !existing.contains(text.trim())) {
+                    // which shows up as the stream *ending with* exactly that text. Only a suffix
+                    // match is treated as a re-send: a `contains` check would also swallow
+                    // genuinely new commentary whose phrasing appeared earlier in the round.
+                    if (existing != trimmed && !existing.endsWith(trimmed)) {
                         if (existing.isNotEmpty()) cur.text.append("\n\n")
                         cur.text.append(text)
                     }
@@ -221,7 +240,7 @@ class RunManager @Inject constructor(
                     name = name ?: "tool",
                     status = "completed",
                     result = event.preview?.pretty(),
-                    durationMs = event.duration?.times(1000)?.toLong(),
+                    durationMs = event.duration?.times(1000)?.toLong(), // server sends seconds
                     error = event.error != null,
                 )
                 state.completeTool(name, completed)
@@ -287,6 +306,7 @@ class RunManager @Inject constructor(
         )
     }
 
+    /** Streamed completion (terminal SSE event). */
     private suspend fun finalize(
         state: StreamState,
         runState: RunState,
@@ -302,41 +322,109 @@ class RunManager @Inject constructor(
             state.segments.clear()
             state.segments.add(Seg().apply { text.append(output) })
         }
+        finalizeRun(
+            runId = state.runId,
+            sessionId = state.sessionId,
+            assistantMessageId = state.assistantMessageId,
+            segments = state.snapshot(),
+            runState = runState,
+            error = error,
+            usage = state.usage,
+            lastEvent = lastEvent,
+            existing = null,
+            fallbackContent = null,
+        )
+    }
+
+    /** Completion discovered by polling (reconcile while the app was away). */
+    private suspend fun finalizeFromServer(
+        run: RunEntity,
+        dto: RunStatusDto,
+        runState: RunState,
+    ) {
+        val messageId = run.assistantMessageId ?: return
+        val existing = messageDao.get(messageId)
+        // Preserve whatever we streamed; only synthesise from `output` when we have nothing.
+        val segments = existing?.segments.orEmpty().takeIf { segs -> segs.any { !it.isEmpty } }
+            ?: dto.output?.takeIf { it.isNotBlank() }?.let { listOf(MessageSegment(text = it)) }
+            ?: emptyList()
+        val error = dto.error?.pretty() ?: if (runState == RunState.FAILED) "任务失败" else null
+        finalizeRun(
+            runId = run.runId,
+            sessionId = run.sessionId,
+            assistantMessageId = messageId,
+            segments = segments,
+            runState = runState,
+            error = error,
+            usage = dto.usage?.toDomain() ?: existing?.usage,
+            lastEvent = dto.lastEvent,
+            existing = existing,
+            fallbackContent = dto.output,
+        )
+    }
+
+    /**
+     * Shared completion core for the streamed ([finalize]) and polled ([finalizeFromServer])
+     * paths: persist the message + run, release the session's active run, refresh the preview,
+     * notify, and line up the authoritative server-transcript sync.
+     */
+    private suspend fun finalizeRun(
+        runId: String,
+        sessionId: String,
+        assistantMessageId: Long,
+        segments: List<MessageSegment>,
+        runState: RunState,
+        error: String?,
+        usage: Usage?,
+        lastEvent: String?,
+        existing: MessageEntity?,
+        fallbackContent: String?,
+    ) {
+        val content = aggregateContent(segments).ifBlank { fallbackContent.orEmpty() }
+        val finalText = segments.lastOrNull { it.text.isNotBlank() }?.text?.trim().orEmpty()
+            .ifBlank { content }
         val messageStatus = when (runState) {
             RunState.COMPLETED -> MessageStatus.COMPLETE
             RunState.CANCELLED, RunState.INTERRUPTED -> MessageStatus.CANCELLED
             else -> MessageStatus.ERROR
         }
-        flush(state, messageStatus, error)
-
-        val segments = state.snapshot()
-        val content = aggregateContent(segments)
-        val finalText = segments.lastOrNull { it.text.isNotBlank() }?.text?.trim().orEmpty()
-            .ifBlank { content }
+        messageDao.updateProgress(
+            id = assistantMessageId,
+            content = content,
+            reasoning = aggregateReasoning(segments).ifBlank { existing?.reasoning.orEmpty() },
+            status = messageStatus.name,
+            toolEvents = gson.toJson(
+                segments.flatMap { it.tools }.ifEmpty { existing?.toolEvents ?: emptyList() },
+            ),
+            segments = gson.toJson(segments),
+            error = error,
+            usage = (usage ?: existing?.usage)?.let { gson.toJson(it) },
+            updatedAt = System.currentTimeMillis(),
+        )
         runDao.updateStatus(
-            runId = state.runId,
+            runId = runId,
             status = runState.name,
             output = content,
             error = error,
             lastEvent = lastEvent,
-            usage = state.usage?.let { gson.toJson(it) },
+            usage = usage?.let { gson.toJson(it) } ?: existing?.usage?.let { gson.toJson(it) },
             updatedAt = System.currentTimeMillis(),
         )
-        sessionDao.setActiveRun(state.sessionId, null, null)
+        sessionDao.setActiveRun(sessionId, null, null)
         sessionDao.touch(
-            id = state.sessionId,
+            id = sessionId,
             updatedAt = System.currentTimeMillis(),
-            preview = finalText.take(120).ifBlank { sessionDao.get(state.sessionId)?.preview ?: "" },
+            preview = finalText.take(120).ifBlank { sessionDao.get(sessionId)?.preview ?: "" },
         )
-        notifyIfNeeded(state.runId, state.sessionId, runState, finalText, error)
+        notifyIfNeeded(runId, sessionId, runState, finalText, error)
         // Make the streamed message match the server transcript exactly (real chain-of-thought,
         // identical segment order) so a later manual sync changes nothing.
         if (runState == RunState.COMPLETED) {
-            val synced = runCatching { syncFromServer(state.sessionId) }.getOrDefault(false)
+            val synced = runCatching { syncFromServer(sessionId) }.getOrDefault(false)
             if (!synced) {
                 scope.launch {
                     delay(SYNC_DEFERRED_DELAY_MS)
-                    runCatching { syncFromServer(state.sessionId) }
+                    runCatching { syncFromServer(sessionId) }
                 }
             }
         }
@@ -348,16 +436,18 @@ class RunManager @Inject constructor(
      * becomes a no-op, and the real per-round reasoning replaces the streamed approximation.
      *
      * Retries a few times: the session row can lag the `run.completed` event by a moment.
+     * The local snapshot is re-read on every attempt, and re-verified inside the write
+     * transaction, so a send landing mid-sync can never be wiped by the delete+re-insert.
      */
     suspend fun syncFromServer(sessionId: String): Boolean {
-        val local = messageDao.list(sessionId)
-        if (local.any {
-                it.status == MessageStatus.STREAMING.name || it.status == MessageStatus.PENDING.name
-            }
-        ) {
-            return false
-        }
         repeat(SYNC_ATTEMPTS) {
+            val local = messageDao.list(sessionId)
+            if (local.any {
+                    it.status == MessageStatus.STREAMING.name || it.status == MessageStatus.PENDING.name
+                }
+            ) {
+                return false
+            }
             val response = runCatching { api.sessionMessages(sessionId) }.getOrNull()
             if (response != null && response.data.isNotEmpty()) {
                 val entities = HistoryFolder.fold(sessionId, response.data, local)
@@ -370,11 +460,23 @@ class RunManager @Inject constructor(
                     // One transaction => a single Room invalidation, so the list never flashes the
                     // empty state between the delete and the re-insert. [HistoryFolder] reuses the
                     // previous row ids for unchanged messages, keeping LazyColumn items mounted.
-                    db.withTransaction {
-                        messageDao.deleteForSession(sessionId)
-                        entities.forEach { messageDao.insert(it) }
+                    val applied = db.withTransaction {
+                        val fresh = messageDao.list(sessionId)
+                        if (fresh.size != local.size || fresh.any {
+                                it.status == MessageStatus.STREAMING.name ||
+                                    it.status == MessageStatus.PENDING.name
+                            }
+                        ) {
+                            // The conversation changed while we were syncing (e.g. a new send):
+                            // abort instead of wiping the user's turn.
+                            false
+                        } else {
+                            messageDao.deleteForSession(sessionId)
+                            entities.forEach { messageDao.insert(it) }
+                            true
+                        }
                     }
-                    return true
+                    if (applied) return true
                 }
             }
             delay(SYNC_RETRY_DELAY_MS)
@@ -391,6 +493,12 @@ class RunManager @Inject constructor(
     ) {
         val run = runDao.get(runId) ?: return
         if (run.notified) return
+        // Claim the slot first (compare-and-set) so a stream finalize racing a worker finalize
+        // cannot produce two notifications for the same run.
+        if (runDao.markNotified(runId) == 0) return
+        // The user is watching this very session: the live UI already shows the outcome, a system
+        // notification would just be noise.
+        if (appVisibility.isForeground && chatVisibility.foregroundSessionId == sessionId) return
         val session = sessionDao.get(sessionId)
         val title = session?.title ?: "Hermes"
         val body = when (runState) {
@@ -403,9 +511,7 @@ class RunManager @Inject constructor(
             title = title,
             message = body,
             success = runState == RunState.COMPLETED,
-            notifyId = runId.hashCode(),
         )
-        runDao.markNotified(runId)
     }
 
     /**
@@ -444,80 +550,28 @@ class RunManager @Inject constructor(
         }
     }
 
-    private suspend fun finalizeFromServer(
-        run: RunEntity,
-        dto: RunStatusDto,
-        runState: RunState,
-    ) {
-        val messageId = run.assistantMessageId ?: return
-        val existing = messageDao.get(messageId)
-        val output = dto.output
-        // Preserve whatever we streamed; only synthesise from `output` when we have nothing.
-        val segments = existing?.segments.orEmpty().takeIf { segs -> segs.any { !it.isEmpty } }
-            ?: output?.takeIf { it.isNotBlank() }?.let { listOf(MessageSegment(text = it)) }
-            ?: emptyList()
-        val content = aggregateContent(segments).ifBlank { output.orEmpty() }
-        val finalText = segments.lastOrNull { it.text.isNotBlank() }?.text?.trim().orEmpty()
-            .ifBlank { content }
-        val error = dto.error?.pretty() ?: if (runState == RunState.FAILED) "任务失败" else null
-        val usage = dto.usage?.toDomain() ?: existing?.usage
-        val messageStatus = when (runState) {
-            RunState.COMPLETED -> MessageStatus.COMPLETE
-            RunState.CANCELLED, RunState.INTERRUPTED -> MessageStatus.CANCELLED
-            else -> MessageStatus.ERROR
-        }
-        messageDao.updateProgress(
-            id = messageId,
-            content = content,
-            reasoning = aggregateReasoning(segments).ifBlank { existing?.reasoning.orEmpty() },
-            status = messageStatus.name,
-            toolEvents = gson.toJson(segments.flatMap { it.tools }.ifEmpty { existing?.toolEvents ?: emptyList() }),
-            segments = gson.toJson(segments),
-            error = error,
-            usage = usage?.let { gson.toJson(it) },
-            updatedAt = System.currentTimeMillis(),
-        )
-        runDao.updateStatus(
-            runId = run.runId,
-            status = runState.name,
-            output = content,
-            error = error,
-            lastEvent = dto.lastEvent,
-            usage = usage?.let { gson.toJson(it) },
-            updatedAt = System.currentTimeMillis(),
-        )
-        sessionDao.setActiveRun(run.sessionId, null, null)
-        sessionDao.touch(
-            id = run.sessionId,
-            updatedAt = System.currentTimeMillis(),
-            preview = finalText.take(120).ifBlank { sessionDao.get(run.sessionId)?.preview ?: "" },
-        )
-        notifyIfNeeded(run.runId, run.sessionId, runState, finalText, error)
-        if (runState == RunState.COMPLETED) {
-            val synced = runCatching { syncFromServer(run.sessionId) }.getOrDefault(false)
-            if (!synced) {
-                scope.launch {
-                    delay(SYNC_DEFERRED_DELAY_MS)
-                    runCatching { syncFromServer(run.sessionId) }
-                }
-            }
-        }
-    }
-
-    /** Request server-side cancellation of a run. */
-    suspend fun stop(runId: String) {
-        runCatching { api.stopRun(runId) }
-        jobs[runId]?.cancel()
-        jobs.remove(runId)
-        val run = runDao.get(runId) ?: return
+    /**
+     * Request server-side cancellation of a run. The local rows are only marked CANCELLED once
+     * the server acknowledged the stop — otherwise a failed request would hide a run that is
+     * still executing server-side (and its result would never be recovered).
+     */
+    suspend fun stop(runId: String): Result<Unit> {
+        val failure = runCatching { api.stopRun(runId) }.exceptionOrNull()
+        if (failure != null) return Result.failure(failure)
+        val job = jobs[runId]
+        job?.cancel()
+        if (job != null) jobs.remove(runId, job)
+        val run = runDao.get(runId) ?: return Result.success(Unit)
         val existing = run.assistantMessageId?.let { messageDao.get(it) }
         val segments = existing?.segments.orEmpty()
         messageDao.updateProgress(
-            id = run.assistantMessageId ?: return,
+            id = run.assistantMessageId ?: return Result.success(Unit),
             content = aggregateContent(segments).ifBlank { existing?.content.orEmpty() },
             reasoning = aggregateReasoning(segments).ifBlank { existing?.reasoning.orEmpty() },
             status = MessageStatus.CANCELLED.name,
-            toolEvents = gson.toJson(segments.flatMap { it.tools }.ifEmpty { existing?.toolEvents ?: emptyList() }),
+            toolEvents = gson.toJson(
+                segments.flatMap { it.tools }.ifEmpty { existing?.toolEvents ?: emptyList() },
+            ),
             segments = gson.toJson(segments),
             error = null,
             usage = existing?.usage?.let { gson.toJson(it) },
@@ -528,6 +582,7 @@ class RunManager @Inject constructor(
             existing?.usage?.let { gson.toJson(it) }, System.currentTimeMillis(),
         )
         sessionDao.setActiveRun(run.sessionId, null, null)
+        return Result.success(Unit)
     }
 
     /** Send an additional instruction into a running task. */
@@ -634,5 +689,10 @@ class RunManager @Inject constructor(
         const val SYNC_ATTEMPTS = 5
         const val SYNC_RETRY_DELAY_MS = 1500L
         const val SYNC_DEFERRED_DELAY_MS = 10_000L
+
+        /** Inline SSE reconnect attempts before handing the run to the reconcile worker. */
+        const val MAX_STREAM_ATTEMPTS = 6
+        const val STREAM_RETRY_BASE_MS = 1_000L
+        const val STREAM_RETRY_MAX_MS = 30_000L
     }
 }

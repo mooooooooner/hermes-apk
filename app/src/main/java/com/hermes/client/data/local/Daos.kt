@@ -39,7 +39,8 @@ interface SessionDao {
 
 @Dao
 interface MessageDao {
-    @Query("SELECT * FROM messages WHERE sessionId = :sessionId ORDER BY seq ASC, createdAt ASC")
+    /** Newest first: the chat renders bottom-up (`reverseLayout`), so item 0 is the newest turn. */
+    @Query("SELECT * FROM messages WHERE sessionId = :sessionId ORDER BY seq DESC, createdAt DESC")
     fun observe(sessionId: String): Flow<List<MessageEntity>>
 
     @Query("SELECT * FROM messages WHERE sessionId = :sessionId ORDER BY seq ASC, createdAt ASC")
@@ -87,6 +88,13 @@ interface MessageDao {
     @Query("DELETE FROM messages WHERE sessionId = :sessionId")
     suspend fun deleteForSession(sessionId: String)
 
+    /** Everything after a user turn, including the assistant row sharing its seq. */
+    @Query(
+        "DELETE FROM messages WHERE sessionId = :sessionId " +
+            "AND (seq > :seq OR (seq = :seq AND role = 'ASSISTANT'))",
+    )
+    suspend fun deleteAfter(sessionId: String, seq: Int)
+
     @Query("DELETE FROM messages WHERE id = :id")
     suspend fun delete(id: Long)
 }
@@ -122,8 +130,9 @@ interface RunDao {
         updatedAt: Long,
     )
 
-    @Query("UPDATE runs SET notified = 1 WHERE runId = :runId")
-    suspend fun markNotified(runId: String)
+    /** Claims the notification slot. Returns 1 when this call transitioned notified 0 -> 1. */
+    @Query("UPDATE runs SET notified = 1 WHERE runId = :runId AND notified = 0")
+    suspend fun markNotified(runId: String): Int
 
     @Query("DELETE FROM runs WHERE sessionId = :sessionId")
     suspend fun deleteForSession(sessionId: String)

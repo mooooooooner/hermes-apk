@@ -156,7 +156,6 @@ object DatabaseModule {
     fun provideDatabase(@ApplicationContext context: Context): HermesDatabase =
         Room.databaseBuilder(context, HermesDatabase::class.java, HermesDatabase.NAME)
             .addMigrations(MIGRATION_1_2)
-            .fallbackToDestructiveMigration()
             .build()
 
     @Provides

@@ -204,11 +204,20 @@ fun SettingsScreen(
                 }
             }
             when (test) {
-                is ConnectionTest.Success -> Text(
-                    text = "✅ 连接成功，模型：" + test.models.joinToString().ifBlank { "(无)" },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.primary,
-                )
+                is ConnectionTest.Success -> Column {
+                    Text(
+                        text = "✅ 连接成功，模型：" + test.models.joinToString().ifBlank { "(无)" },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    if (test.insecureUrl) {
+                        Text(
+                            text = "⚠️ 当前使用明文 http，凭据与对话内容可能被窃听，建议使用 https。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                }
                 is ConnectionTest.Failure -> Text(
                     text = "❌ ${test.message}",
                     style = MaterialTheme.typography.bodySmall,

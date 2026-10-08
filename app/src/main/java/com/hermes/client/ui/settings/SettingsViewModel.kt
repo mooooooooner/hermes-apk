@@ -24,7 +24,11 @@ import javax.inject.Inject
 sealed interface ConnectionTest {
     data object Idle : ConnectionTest
     data object Loading : ConnectionTest
-    data class Success(val models: List<String>) : ConnectionTest
+    data class Success(
+        val models: List<String>,
+        /** True when the configured Base URL uses plaintext http://. */
+        val insecureUrl: Boolean = false,
+    ) : ConnectionTest
     data class Failure(val message: String) : ConnectionTest
 }
 
@@ -99,10 +103,12 @@ class SettingsViewModel @Inject constructor(
             settingsRepository.setBaseUrl(baseUrl)
             settingsRepository.setApiKey(apiKey)
             _test.value = ConnectionTest.Loading
+            val insecure = baseUrl.trim().startsWith("http://", ignoreCase = true)
             runCatching { api.listModels() }
                 .onSuccess { response ->
                     _test.value = ConnectionTest.Success(
-                        response.data.mapNotNull { it.id },
+                        models = response.data.mapNotNull { it.id },
+                        insecureUrl = insecure,
                     )
                 }
                 .onFailure { error ->

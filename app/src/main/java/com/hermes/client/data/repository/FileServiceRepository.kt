@@ -10,10 +10,14 @@ import com.hermes.client.data.remote.dto.UploadedFileDto
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
-import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.RequestBody
+import okio.BufferedSink
+import okio.source
 import java.io.File
+import java.io.IOException
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -36,14 +40,25 @@ class FileServiceRepository @Inject constructor(
     suspend fun upload(attachment: Attachment): UploadedFileDto? = withContext(Dispatchers.IO) {
         runCatching {
             val uri = Uri.parse(attachment.uri)
-            val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                ?: return@runCatching null
             val mediaType = attachment.mimeType.ifBlank { "application/octet-stream" }
                 .toMediaTypeOrNull()
+            // Stream the content instead of buffering the whole file: a large video or image must
+            // never sit in memory twice (bytes + encoded multipart copy).
+            val body = object : RequestBody() {
+                override fun contentType(): MediaType? = mediaType
+
+                override fun contentLength(): Long = attachment.size.takeIf { it > 0 } ?: -1L
+
+                override fun writeTo(sink: BufferedSink) {
+                    val input = context.contentResolver.openInputStream(uri)
+                        ?: throw IOException("无法读取 ${attachment.name}")
+                    input.use { sink.writeAll(it.source()) }
+                }
+            }
             val part = MultipartBody.Part.createFormData(
                 "file",
                 attachment.name.ifBlank { "upload.bin" },
-                bytes.toRequestBody(mediaType),
+                body,
             )
             api.upload(part)
         }.getOrNull()
@@ -75,10 +90,19 @@ class FileServiceRepository @Inject constructor(
             val id = fileId(url) ?: return@runCatching null
             val body = api.download(id)
             val safeName = (name ?: id).replace(Regex("[^A-Za-z0-9._-]"), "_").take(80)
-            val dir = File(context.cacheDir, "downloads").apply { mkdirs() }
+            val dir = File(context.cacheDir, "downloads").apply {
+                mkdirs()
+                // Keep the cache bounded: drop anything older than a week on every download.
+                val cutoff = System.currentTimeMillis() - CACHE_TTL_MS
+                listFiles()?.forEach { f -> if (f.isFile && f.lastModified() < cutoff) f.delete() }
+            }
             val target = File(dir, safeName)
             body.byteStream().use { input -> target.outputStream().use { input.copyTo(it) } }
             target
         }.getOrNull()
+    }
+
+    private companion object {
+        const val CACHE_TTL_MS = 7L * 24 * 60 * 60 * 1000
     }
 }

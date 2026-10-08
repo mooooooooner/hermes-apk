@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Cleartext must stay permitted because users can point the Base URL at a self-hosted
+  LAN server over http://. It is scoped here (instead of android:usesCleartextTraffic in the
+  manifest) so the policy is documented in one place, and the settings screen warns the user
+  when an http:// URL is configured.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>
