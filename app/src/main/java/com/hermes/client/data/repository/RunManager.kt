@@ -1,5 +1,6 @@
 package com.hermes.client.data.repository
 
+import androidx.room.withTransaction
 import com.google.gson.Gson
 import com.google.gson.JsonElement
 import com.hermes.client.data.local.HermesDatabase
@@ -366,8 +367,13 @@ class RunManager @Inject constructor(
                 val ready = last != null && last.role != MessageRole.USER.name &&
                     (last.content.isNotBlank() || last.segments.any { !it.isEmpty })
                 if (ready) {
-                    messageDao.deleteForSession(sessionId)
-                    entities.forEach { messageDao.insert(it) }
+                    // One transaction => a single Room invalidation, so the list never flashes the
+                    // empty state between the delete and the re-insert. [HistoryFolder] reuses the
+                    // previous row ids for unchanged messages, keeping LazyColumn items mounted.
+                    db.withTransaction {
+                        messageDao.deleteForSession(sessionId)
+                        entities.forEach { messageDao.insert(it) }
+                    }
                     return true
                 }
             }

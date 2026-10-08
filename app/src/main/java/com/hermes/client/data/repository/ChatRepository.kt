@@ -3,6 +3,7 @@ package com.hermes.client.data.repository
 import android.content.Context
 import android.net.Uri
 import android.util.Base64
+import androidx.room.withTransaction
 import com.google.gson.JsonArray
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
@@ -296,8 +297,12 @@ class ChatRepository @Inject constructor(
             // the streaming path produces so the format does not change after a manual sync.
             val previous = messageDao.list(sessionId)
             val entities = HistoryFolder.fold(sessionId, response.data, previous)
-            messageDao.deleteForSession(sessionId)
-            entities.forEach { messageDao.insert(it) }
+            // One transaction => a single Room invalidation, so the list never flashes the empty
+            // state between the delete and the re-insert. Reused ids keep LazyColumn items mounted.
+            db.withTransaction {
+                messageDao.deleteForSession(sessionId)
+                entities.forEach { messageDao.insert(it) }
+            }
             entities.size
         }
     }

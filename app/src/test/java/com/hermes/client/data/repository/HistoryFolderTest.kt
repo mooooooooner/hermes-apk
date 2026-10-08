@@ -135,4 +135,20 @@ class HistoryFolderTest {
         assertEquals("terminal", tools[0].name)
         assertEquals("ok", tools[0].result)
     }
+
+    @Test
+    fun reusesLocalRowIdsForUnchangedMessages() {
+        val previous = listOf(
+            MessageEntity(id = 7, sessionId = "s", role = MessageRole.USER.name, content = "hi", seq = 1),
+            MessageEntity(id = 8, sessionId = "s", role = MessageRole.ASSISTANT.name, content = "hello", seq = 2),
+        )
+        val data = listOf(
+            ServerMessage(role = "user", content = JsonPrimitive("hi")),
+            ServerMessage(role = "assistant", content = JsonPrimitive("hello")),
+        )
+        val entities = HistoryFolder.fold("s", data, previous, now = 1L)
+
+        // Stable ids keep LazyColumn items mounted across a sync: no flash, no scroll jump.
+        assertEquals(listOf(7L, 8L), entities.map { it.id })
+    }
 }

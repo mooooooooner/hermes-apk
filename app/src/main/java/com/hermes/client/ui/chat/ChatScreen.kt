@@ -199,14 +199,12 @@ fun ChatScreen(
     var editTarget by remember { mutableStateOf<ChatMessage?>(null) }
 
     val listState = rememberLazyListState()
+    // Messages are laid out bottom-up (`reverseLayout` below): item 0 is the newest turn and sits
+    // at the bottom. Streaming/tool-call growth therefore stays pinned to the bottom instead of
+    // snapping the last message to the viewport top, and scrolling up to read history is never
+    // yanked back. Only an actual new turn (size change) re-anchors to the bottom.
     LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) listState.scrollToItem(messages.lastIndex)
-    }
-    LaunchedEffect(messages.lastOrNull()?.content?.length) {
-        if (messages.isNotEmpty()) {
-            val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-            if (lastVisible >= messages.lastIndex - 2) listState.scrollToItem(messages.lastIndex)
-        }
+        if (messages.isNotEmpty()) listState.scrollToItem(0)
     }
 
     // Show slash-command suggestions while the user is typing a bare "/name" token.
@@ -283,10 +281,11 @@ fun ChatScreen(
                     LazyColumn(
                         state = listState,
                         modifier = Modifier.fillMaxSize(),
+                        reverseLayout = true,
                         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
                         verticalArrangement = Arrangement.spacedBy(18.dp),
                     ) {
-                        itemsIndexed(messages, key = { _, item -> item.id }) { _, message ->
+                        itemsIndexed(messages.asReversed(), key = { _, item -> item.id }) { _, message ->
                             when (message.role) {
                                 MessageRole.USER -> UserMessage(
                                     message = message,

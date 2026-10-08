@@ -104,3 +104,14 @@
   - **修复**：在 `hermes-android` 派发块内、构造事件之前，把该 run 的 routing key 绑定到真实 `session_id`——复用 `/resume`/CLI handoff 的既有组合 `get_or_create_session(source)` + `switch_session(key, session_id)`（`gateway/run_startup.py:1790-1795`），store 取自 `self._session_store`（回退 `self.gateway_runner.session_store`）。仅在 `selected_session_id` 非空时执行；失败只 `logger.warning`，不影响 run。首个命令会经 `get_or_create_session` 先铸一行临时会话、再被 `switch_session` 以 `session_end` 结束（此后同 key 命中即零写入）——这是 `/resume` 已有的既定模式。
   - **验证（live）**：`/status` 现在显示 `Session ID: hm-reg-531679`、标题与 17,335 lifetime tokens；`/usage` 返回 `Session Info | Messages: 2`；`/context` 返回该会话的 `~47 tokens across 2 messages`。（无 live agent 时 `/usage` 仍如实降级为 transcript 估算，这是 Hermes 既定行为。）
   - 新补丁 md5 `b8404632ebb20c3e51934d9688caa042`。**重启注意**：网关有自我重启守卫（`tools/terminal_tool_guards.py`），从网关进程内部跑 `systemctl restart` / `systemd-run ... systemctl restart` 会被拒；应改用 `systemctl reload hermes-gateway.service`（网关把 SIGUSR1 视为优雅重启，守卫正则不含 `reload`）。
+
+### 本批次（更新不再闪屏 / 新内容不再跳到消息开头）
+- **现象 1（闪屏）**：run 完成后的静默同步（以及手动同步）会让聊天列表瞬间闪白/闪空。
+  - **根因**：`ChatRepository.fetchHistory()` 与 `RunManager.syncFromServer()` 都是「先 `deleteForSession` 再逐条 `insert`」，且不在同一事务里。Room 的 `Flow` 是失效驱动：删除与插入之间会各自触发一次查询，观察者先收到**空列表**（触发 `EmptyChatHint` 闪现），再收到逐步拼出的列表；同时新插入的行拿到新的自增 id，`LazyColumn` 的 `key = item.id` 全变，整表被销毁重建，进一步加剧闪烁与滚动跳动。
+  - **修复 1（原子替换）**：两条同步路径的删除+插入都包进 `db.withTransaction { ... }`（`room-ktx`），Room 只在事务提交后发一次失效 → 观察者只会看到最终列表，不再闪现空状态。
+  - **修复 2（稳定 id）**：`HistoryFolder.fold()` 末尾新增 `reuseLocalIds()`：先按「索引对齐 + 角色/内容相同」复用本地旧行的 `id`/`createdAt`（覆盖常见情形：同一会话顺序不变的同步），再按「角色+内容」兜底匹配被插入/删除挤位的行。id 稳定 → `LazyColumn` 的 item 不会被销毁重建。已补单测 `reusesLocalRowIdsForUnchangedMessages`。
+- **现象 2（新内容跳到消息开头）**：流式回复越长、或出现新的工具调用/新消息时，视图总会「对齐到这条消息的**顶部**」，看不到最新内容；用户往上翻读历史时也会被拽走。
+  - **根因**：`ChatScreen` 里 `LaunchedEffect(messages.size)` 与 `LaunchedEffect(last.content.length)` 都调用 `listState.scrollToItem(messages.lastIndex)`——`scrollToItem(index)` 是把该 item「顶部」对齐到视口顶部；对长消息就表现为永远停在消息开头。第二个 effect 又在流式增长时反复重对齐。
+  - **修复**：列表改为 `reverseLayout = true` + `itemsIndexed(messages.asReversed(), key = { _, it -> it.id })`（item 0 = 最新一条，落在底部）。reverseLayout 天然把「底部」作为锚点：流式/工具卡片增长时底部保持不动、只向上扩展；用户上翻后新内容不会把视图拽回。自动滚动只剩一条 `LaunchedEffect(messages.size) { listState.scrollToItem(0) }`，仅在**回合数变化**（发送新消息/首次加载）时回到最新，流式增量与工具调用不会触发。
+  - **已实测（模拟器 `hermes`）**：打开会话落在最新内容（底部）；发送一条会流式长回复的消息，流式中途上翻到历史，5 秒后位置不变；run 完成后自动同步仍停在原处，未跳回底部、未闪空。
+

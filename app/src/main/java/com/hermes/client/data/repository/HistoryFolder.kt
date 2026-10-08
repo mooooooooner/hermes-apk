@@ -84,7 +84,39 @@ object HistoryFolder {
             }
         }
         flushAssistant()
-        return mergeLocalOnlyTurns(serverEntities = entities, previous = previous)
+        val merged = mergeLocalOnlyTurns(serverEntities = entities, previous = previous)
+        return reuseLocalIds(merged, previous)
+    }
+
+    /**
+     * Reuse the local row id (and creation time) of messages that already exist, so a sync does not
+     * churn primary keys. LazyColumn keys items by id: stable ids keep the items mounted instead of
+     * disposing and re-creating the whole list, which is what made a post-run sync flash and jump.
+     */
+    private fun reuseLocalIds(
+        entities: List<MessageEntity>,
+        previous: List<MessageEntity>,
+    ): List<MessageEntity> {
+        if (previous.isEmpty()) return entities
+        val result = entities.toMutableList()
+        val unused = previous.toMutableList()
+        // Index-aligned pass handles the common case (same conversation, same order).
+        result.forEachIndexed { index, entity ->
+            val old = previous.getOrNull(index) ?: return@forEachIndexed
+            if (old.role == entity.role && old.content == entity.content) {
+                result[index] = entity.copy(id = old.id, createdAt = old.createdAt)
+                unused.remove(old)
+            }
+        }
+        // Fallback pass for messages shifted by insertions/deletions: match by role + content.
+        result.forEachIndexed { index, entity ->
+            if (entity.id != 0L) return@forEachIndexed
+            val old = unused.firstOrNull { it.role == entity.role && it.content == entity.content }
+                ?: return@forEachIndexed
+            unused.remove(old)
+            result[index] = entity.copy(id = old.id, createdAt = old.createdAt)
+        }
+        return result
     }
 
     /**
