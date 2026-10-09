@@ -1,0 +1,48 @@
+name: hermes_client
+description: Hermes Agent client — Flutter port of the native Android app, for Android + Windows.
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.13.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Network (REST + SSE streaming)
+  dio: ^5.7.0
+
+  # Persistence
+  drift: ^2.22.1
+  sqlite3_flutter_libs: ^0.5.26
+  shared_preferences: ^2.3.3
+  path_provider: ^2.1.5
+  path: ^1.9.0
+
+  # Background reconcile (Android only) + notifications
+  workmanager: ^0.10.10
+  flutter_local_notifications: ^18.0.1
+  local_notifier: ^0.1.6
+
+  # Media / files
+  file_picker: ^13.1.0
+  record: ^7.1.0
+  permission_handler: ^11.3.1
+  open_filex: ^4.5.0
+  url_launcher: ^6.3.1
+
+  # Theming / misc
+  dynamic_color: ^1.7.0
+  uuid: ^4.5.1
+  window_manager: ^0.4.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+  drift_dev: ^2.22.1
+  build_runner: ^2.4.13
+
+flutter:
+  uses-material-design: true
